@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import uuid
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import dialect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.config import Settings
-from backend.db import create_database_and_schema, create_session_factory
+from backend.db import create_database_and_schema, create_session_factory, dispose_session_factory
 from backend.encoders.base import EncoderIdentity
 from backend.models import ImageEmbedding, ImageRecord
 from backend.repository import ImageRepository, cosine_distance_to_percent
@@ -50,7 +53,11 @@ def settings() -> Settings:
 def session_factory(settings: Settings):
     """仅幂等创建本任务所需 schema，再提供会话工厂。"""
     create_database_and_schema(settings)
-    return create_session_factory(settings)
+    factory = create_session_factory(settings)
+    try:
+        yield factory
+    finally:
+        dispose_session_factory(factory)
 
 
 @pytest.fixture
@@ -108,6 +115,38 @@ def test_schema_initialization_is_idempotent_and_enables_vector(settings: Settin
     create_database_and_schema(settings)
 
     assert db_session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")).scalar_one()
+
+
+def test_schema_initialization_is_safe_for_two_concurrent_connections(settings: Settings) -> None:
+    """两个连接同时初始化时应串行完成，而不是出现重复 DDL 错误或死锁。"""
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(create_database_and_schema, settings) for _ in range(2)]
+        for future in futures:
+            assert future.result(timeout=20) is None
+
+
+def test_dispose_session_factory_disposes_its_bound_engine() -> None:
+    """长期 CLI/API 进程可显式释放连接池，避免测试或短命令残留连接。"""
+    engine = MagicMock()
+    from sqlalchemy.orm import sessionmaker
+
+    session_factory = sessionmaker(bind=engine)
+    dispose_session_factory(session_factory)
+
+    engine.dispose.assert_called_once_with()
+
+
+def test_upsert_uses_postgresql_conflict_update_without_preselect() -> None:
+    """同一模型向量的并发写入必须由数据库唯一约束原子仲裁。"""
+    session = MagicMock()
+    repository = ImageRepository(session)
+    image = MagicMock(id=123)
+
+    repository.upsert_embedding(image, EncoderIdentity("fake", "atomic", "v1", 3), unit([1, 0, 0]))
+
+    session.scalar.assert_not_called()
+    statement = session.execute.call_args.args[0]
+    assert "ON CONFLICT" in str(statement.compile(dialect=dialect()))
 
 
 def test_repository_finds_lists_counts_and_normalizes_relative_paths(repository: ImageRepository) -> None:
@@ -204,6 +243,63 @@ def test_repository_rejects_invalid_vectors_before_write(repository: ImageReposi
     assert repository.embedding_count(image.id) == 0
 
 
+@pytest.mark.parametrize(
+    "embedding",
+    [
+        np.asarray([0, 0, 0], dtype=np.float32),
+        np.asarray([2, 0, 0], dtype=np.float32),
+        np.asarray([np.inf, 0, 0], dtype=np.float32),
+    ],
+)
+def test_repository_rejects_non_unit_vectors_before_write(repository: ImageRepository, embedding: np.ndarray) -> None:
+    """编码器契约要求有限的单位向量，仓库必须在写入边界重复验证。"""
+    image = add_test_image(repository)
+
+    with pytest.raises(ValueError):
+        repository.upsert_embedding(image, EncoderIdentity("fake", "model", "v1", 3), embedding)
+
+    assert repository.embedding_count(image.id) == 0
+
+
+@pytest.mark.parametrize("stored_path", ["C:outside.jpg", "\\\\server\\share\\image.jpg"])
+def test_repository_rejects_windows_drive_and_unc_paths(repository: ImageRepository, stored_path: str) -> None:
+    """Windows drive-relative 与 UNC 路径也可能脱离项目根目录，不能写入数据库。"""
+    with pytest.raises(ValueError, match="相对于项目根目录"):
+        repository.add_image(
+            original_name="bad-windows-path.jpg",
+            stored_path=stored_path,
+            sha256=random_sha256(),
+            mime_type="image/jpeg",
+            width=12,
+            height=8,
+        )
+
+
+@pytest.mark.parametrize("sha256", ["A" * 64, "g" * 64, "a" * 63])
+def test_repository_rejects_noncanonical_sha256_before_write(repository: ImageRepository, sha256: str) -> None:
+    """哈希必须是小写 64 位十六进制文本，防止错误去重键绕过数据库约束。"""
+    with pytest.raises(ValueError, match="SHA-256"):
+        repository.add_image(
+            original_name="bad-hash.jpg",
+            stored_path="data/images/bad-hash.jpg",
+            sha256=sha256,
+            mime_type="image/jpeg",
+            width=12,
+            height=8,
+        )
+
+
+def test_image_count_uses_database_count_query() -> None:
+    """统计记录数不应加载全表图片元数据。"""
+    session = MagicMock()
+    session.scalar.return_value = 7
+
+    count = ImageRepository(session).image_count()
+
+    assert count == 7
+    session.scalars.assert_not_called()
+
+
 def test_cosine_distance_percentage_clamps_rounds_and_rejects_non_finite_values() -> None:
     """对 pgvector 返回值统一裁剪，避免边界浮点误差传递给 API。"""
     assert cosine_distance_to_percent(-0.1) == 100.0
@@ -243,6 +339,19 @@ def test_database_constraints_and_cascade_apply_inside_rollback_transaction(
                     pretrained="v1",
                     dimension=0,
                     embedding=unit([1, 0, 0]),
+                )
+            )
+            db_session.flush()
+    with pytest.raises(IntegrityError):
+        with db_session.begin_nested():
+            db_session.add(
+                ImageRecord(
+                    original_name="invalid-hash.jpg",
+                    stored_path="data/images/invalid-hash.jpg",
+                    sha256="A" * 64,
+                    mime_type="image/jpeg",
+                    width=12,
+                    height=8,
                 )
             )
             db_session.flush()

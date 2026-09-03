@@ -20,6 +20,7 @@ class ImageRecord(Base):
     __table_args__ = (
         CheckConstraint("width > 0", name="ck_images_width_positive"),
         CheckConstraint("height > 0", name="ck_images_height_positive"),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_images_sha256_lower_hex"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

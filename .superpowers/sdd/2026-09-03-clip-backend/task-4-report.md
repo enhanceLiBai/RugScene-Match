@@ -33,3 +33,13 @@
 ## 提交
 
 最终提交 SHA 由本任务交付消息提供。
+
+## 审查修复（追加）
+
+- 初始化使用 PostgreSQL advisory lock：管理库 session lock 串行化数据库创建，目标库 transaction lock 串行化扩展与 schema DDL；双连接并发初始化测试通过。
+- 向量写入改为 PostgreSQL `INSERT ... ON CONFLICT ... DO UPDATE`，不再先查询后写入；ORM 状态在 Core UPSERT 后统一过期。
+- 持久化边界增加有限 L2 单位向量验证，路径拒绝 Windows drive/UNC，SHA-256 限制为 64 位小写十六进制。
+- 数据库为 SHA-256 增加命名 CHECK；既有 schema 仅在数据合法时幂等补齐，否则给出不包含敏感信息的中文错误。
+- `image_count()` 改为数据库 `COUNT(*)`；session factory 增加显式 dispose 生命周期，测试 fixture 结束时释放连接池。
+- 审查新增先行测试红灯：零范数/非单位向量、drive-relative 路径、错误 SHA 和全表计数共 7 项失败；修复后全部转绿。
+- 审查后 `tests/test_repository.py -v`：28 passed。

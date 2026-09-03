@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
+import re
 from typing import Final
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from backend.encoders.base import EncoderIdentity
@@ -34,6 +36,7 @@ class SearchRow:
 
 
 _VECTOR_DTYPE: Final = np.dtype(np.float32)
+_SHA256_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
 
 
 def cosine_distance_to_percent(distance: float) -> float:
@@ -54,6 +57,9 @@ def _validated_vector(identity: EncoderIdentity, values: np.ndarray) -> np.ndarr
         raise ValueError("图片编码向量维度与编码器身份不一致。")
     if not np.isfinite(values).all():
         raise ValueError("图片编码向量不能包含 NaN 或 Infinity。")
+    norm = float(np.linalg.norm(values))
+    if not np.isfinite(norm) or not np.isclose(norm, 1.0, rtol=1e-4, atol=1e-5):
+        raise ValueError("图片编码向量必须是有限的 L2 单位向量。")
     return values
 
 
@@ -63,7 +69,8 @@ def _relative_posix_path(stored_path: str) -> str:
     path = PurePosixPath(normalized)
     if not normalized or path.is_absolute() or ".." in path.parts or path == PurePosixPath("."):
         raise ValueError("图片存储路径必须是相对于项目根目录的路径。")
-    if PureWindowsPath(stored_path).is_absolute():
+    windows_path = PureWindowsPath(stored_path)
+    if windows_path.drive or windows_path.root:
         raise ValueError("图片存储路径必须是相对于项目根目录的路径。")
     return path.as_posix()
 
@@ -90,6 +97,8 @@ class ImageRepository:
         height: int,
     ) -> ImageRecord:
         """新增一条图片元数据，并刷新主键但不提交事务。"""
+        if not _SHA256_PATTERN.fullmatch(sha256):
+            raise ValueError("图片 SHA-256 必须是 64 位小写十六进制文本。")
         record = ImageRecord(
             original_name=original_name,
             stored_path=_relative_posix_path(stored_path),
@@ -108,7 +117,7 @@ class ImageRepository:
 
     def image_count(self) -> int:
         """返回当前事务可见的图片数。"""
-        return len(self.list_images())
+        return int(self._session.scalar(select(func.count(ImageRecord.id))) or 0)
 
     def embedding_count(self, image_id: int | None = None) -> int:
         """返回当前事务可见的向量数，可按图片过滤。"""
@@ -120,29 +129,27 @@ class ImageRepository:
     def upsert_embedding(self, image: ImageRecord, identity: EncoderIdentity, embedding: np.ndarray) -> None:
         """新增或更新指定图片与完整模型身份对应的唯一向量。"""
         vector = _validated_vector(identity, embedding)
-        existing = self._session.scalar(
-            select(ImageEmbedding).where(
-                ImageEmbedding.image_id == image.id,
-                ImageEmbedding.encoder == identity.encoder,
-                ImageEmbedding.model_name == identity.model_name,
-                ImageEmbedding.pretrained == identity.pretrained,
-            )
+        statement = insert(ImageEmbedding).values(
+            image_id=image.id,
+            encoder=identity.encoder,
+            model_name=identity.model_name,
+            pretrained=identity.pretrained,
+            dimension=identity.dimension,
+            embedding=vector,
         )
-        if existing is None:
-            self._session.add(
-                ImageEmbedding(
-                    image_id=image.id,
-                    encoder=identity.encoder,
-                    model_name=identity.model_name,
-                    pretrained=identity.pretrained,
-                    dimension=identity.dimension,
-                    embedding=vector,
-                )
-            )
-        else:
-            existing.dimension = identity.dimension
-            existing.embedding = vector
+        statement = statement.on_conflict_do_update(
+            index_elements=(
+                ImageEmbedding.image_id,
+                ImageEmbedding.encoder,
+                ImageEmbedding.model_name,
+                ImageEmbedding.pretrained,
+            ),
+            set_={"dimension": identity.dimension, "embedding": vector},
+        )
+        self._session.execute(statement)
         self._session.flush()
+        # Core UPSERT 不会自动同步已加载的 ORM 行，统一过期以保证后续读取不会使用旧向量。
+        self._session.expire_all()
 
     def search(
         self,
