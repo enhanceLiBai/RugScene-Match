@@ -36,6 +36,33 @@ def test_settings_environment_overrides_project_dotenv(tmp_path: Path, monkeypat
     assert settings.postgres_host == "environment-host"
 
 
+def test_settings_loads_each_project_dotenv_without_cross_project_leakage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """连续读取不同项目时，后一次不能继承前一个项目的 .env 配置。"""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    first_project = tmp_path / "first"
+    second_project = tmp_path / "second"
+    first_project.mkdir()
+    second_project.mkdir()
+    (first_project / ".env").write_text(
+        "POSTGRES_HOST=first-host\nPOSTGRES_PASSWORD=first-password\n",
+        encoding="utf-8",
+    )
+    (second_project / ".env").write_text(
+        "POSTGRES_HOST=second-host\nPOSTGRES_PASSWORD=second-password\n",
+        encoding="utf-8",
+    )
+
+    first_settings = Settings.load(first_project)
+    second_settings = Settings.load(second_project)
+
+    assert first_settings.postgres_host == "first-host"
+    assert second_settings.postgres_host == "second-host"
+    assert second_settings.postgres_password == "second-password"
+
+
 def test_database_url_uses_requested_database_and_preserves_password(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """数据库名覆盖不应通过手工字符串拼接破坏含特殊字符的密码。"""
     monkeypatch.setenv("POSTGRES_PASSWORD", "reserved:/?#[]@")

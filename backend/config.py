@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from sqlalchemy import URL
 
 
@@ -37,24 +37,27 @@ class Settings:
     def load(cls, project_root: Path | None = None) -> "Settings":
         """从项目 .env 和进程环境变量读取配置，后者优先。"""
         root = (project_root or Path(__file__).resolve().parent.parent).resolve()
-        # override=False 保留部署环境显式注入的配置，避免 .env 覆盖它们。
-        load_dotenv(dotenv_path=root / ".env", override=False, encoding="utf-8")
+        dotenv_settings = dotenv_values(root / ".env", encoding="utf-8")
 
-        password = os.getenv("POSTGRES_PASSWORD")
+        def setting(name: str, default: str | None = None) -> str | None:
+            # .env 仅作为当前 Settings 的默认值，不能污染后续项目的配置读取。
+            return os.getenv(name, dotenv_settings.get(name, default))
+
+        password = setting("POSTGRES_PASSWORD")
         if not password:
             raise ValueError("缺少 POSTGRES_PASSWORD，请在环境变量或项目 .env 中配置数据库密码。")
 
         return cls(
             project_root=root,
-            postgres_host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
-            postgres_port=int(os.getenv("POSTGRES_PORT", "5432")),
-            postgres_db=os.getenv("POSTGRES_DB", "carpet_matcher"),
-            postgres_user=os.getenv("POSTGRES_USER", "postgres"),
+            postgres_host=setting("POSTGRES_HOST", "127.0.0.1") or "127.0.0.1",
+            postgres_port=int(setting("POSTGRES_PORT", "5432") or "5432"),
+            postgres_db=setting("POSTGRES_DB", "carpet_matcher") or "carpet_matcher",
+            postgres_user=setting("POSTGRES_USER", "postgres") or "postgres",
             postgres_password=password,
-            image_encoder=os.getenv("IMAGE_ENCODER", "open_clip"),
-            clip_model_name=os.getenv("CLIP_MODEL_NAME", "ViT-B-32"),
-            clip_pretrained=os.getenv("CLIP_PRETRAINED", "openai"),
-            model_device=os.getenv("MODEL_DEVICE", "auto"),
+            image_encoder=setting("IMAGE_ENCODER", "open_clip") or "open_clip",
+            clip_model_name=setting("CLIP_MODEL_NAME", "ViT-B-32") or "ViT-B-32",
+            clip_pretrained=setting("CLIP_PRETRAINED", "openai") or "openai",
+            model_device=setting("MODEL_DEVICE", "auto") or "auto",
         )
 
     def cache_environment(self) -> dict[str, str]:
