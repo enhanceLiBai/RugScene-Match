@@ -43,3 +43,9 @@
 - `image_count()` 改为数据库 `COUNT(*)`；session factory 增加显式 dispose 生命周期，测试 fixture 结束时释放连接池。
 - 审查新增先行测试红灯：零范数/非单位向量、drive-relative 路径、错误 SHA 和全表计数共 7 项失败；修复后全部转绿。
 - 审查后 `tests/test_repository.py -v`：28 passed。
+
+## 规模化简化（追加）
+
+- 当前仅 8 人并发、约 1 万张图片，移除低频人工 `init-db` 的 advisory lock 和对应并发测试，保持初始化路径直接易读。
+- 不添加数据库级向量维度 CHECK；仓库层已在写入/查询前校验向量 shape、float32、有限值与单位范数。
+- `embedding_count()` 改为 SQL `COUNT(*)`，避免读取全部向量对象。

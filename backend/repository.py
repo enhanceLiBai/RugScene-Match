@@ -121,10 +121,10 @@ class ImageRepository:
 
     def embedding_count(self, image_id: int | None = None) -> int:
         """返回当前事务可见的向量数，可按图片过滤。"""
-        statement = select(ImageEmbedding)
+        statement = select(func.count(ImageEmbedding.id))
         if image_id is not None:
             statement = statement.where(ImageEmbedding.image_id == image_id)
-        return len(list(self._session.scalars(statement)))
+        return int(self._session.scalar(statement) or 0)
 
     def upsert_embedding(self, image: ImageRecord, identity: EncoderIdentity, embedding: np.ndarray) -> None:
         """新增或更新指定图片与完整模型身份对应的唯一向量。"""

@@ -24,22 +24,13 @@ def create_database_and_schema(settings: Settings) -> None:
         autocommit=True,
     ) as connection:
         with connection.cursor() as cursor:
-            lock_name = f"{settings.postgres_db}:database-initialization"
-            cursor.execute("SELECT pg_advisory_lock(hashtext(%s))", (lock_name,))
-            try:
-                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (settings.postgres_db,))
-                if cursor.fetchone() is None:
-                    cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(settings.postgres_db)))
-            finally:
-                cursor.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_name,))
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (settings.postgres_db,))
+            if cursor.fetchone() is None:
+                cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(settings.postgres_db)))
 
     engine = create_engine(settings.database_url(), future=True)
     try:
         with engine.begin() as connection:
-            connection.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(:lock_name))"),
-                {"lock_name": f"{settings.postgres_db}:schema-initialization"},
-            )
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             Base.metadata.create_all(connection)
             _upgrade_sha256_column(connection)

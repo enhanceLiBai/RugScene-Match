@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import uuid
 from unittest.mock import MagicMock
 
@@ -115,14 +114,6 @@ def test_schema_initialization_is_idempotent_and_enables_vector(settings: Settin
     create_database_and_schema(settings)
 
     assert db_session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")).scalar_one()
-
-
-def test_schema_initialization_is_safe_for_two_concurrent_connections(settings: Settings) -> None:
-    """两个连接同时初始化时应串行完成，而不是出现重复 DDL 错误或死锁。"""
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(create_database_and_schema, settings) for _ in range(2)]
-        for future in futures:
-            assert future.result(timeout=20) is None
 
 
 def test_dispose_session_factory_disposes_its_bound_engine() -> None:
@@ -297,6 +288,17 @@ def test_image_count_uses_database_count_query() -> None:
     count = ImageRepository(session).image_count()
 
     assert count == 7
+    session.scalars.assert_not_called()
+
+
+def test_embedding_count_uses_database_count_query() -> None:
+    """向量统计不应加载全部向量对象。"""
+    session = MagicMock()
+    session.scalar.return_value = 3
+
+    count = ImageRepository(session).embedding_count(image_id=123)
+
+    assert count == 3
     session.scalars.assert_not_called()
 
 
