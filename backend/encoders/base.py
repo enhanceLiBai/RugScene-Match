@@ -20,8 +20,8 @@ class EncoderIdentity:
         """拒绝不完整身份，避免把未知向量写入持久层。"""
         if not self.encoder or not self.model_name or not self.pretrained:
             raise ValueError("编码器身份字段不能为空。")
-        if self.dimension <= 0:
-            raise ValueError("编码器向量维度必须大于零。")
+        if isinstance(self.dimension, bool) or not isinstance(self.dimension, int) or self.dimension <= 0:
+            raise ValueError("编码器向量维度必须为正整数。")
 
 
 class ImageEncoder(Protocol):

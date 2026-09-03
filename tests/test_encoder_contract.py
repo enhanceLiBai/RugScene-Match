@@ -74,12 +74,17 @@ def test_normalize_embedding_returns_float32_unit_vector() -> None:
         ("open_clip", "", "weights", 1),
         ("open_clip", "model", "", 1),
         ("open_clip", "model", "weights", 0),
+        ("open_clip", "model", "weights", -1),
+        ("open_clip", "model", "weights", True),
+        ("open_clip", "model", "weights", 1.5),
+        ("open_clip", "model", "weights", float("nan")),
+        ("open_clip", "model", "weights", float("inf")),
     ],
 )
 def test_encoder_identity_rejects_incomplete_vector_space(
-    encoder: str, model_name: str, pretrained: str, dimension: int
+    encoder: str, model_name: str, pretrained: str, dimension: object
 ) -> None:
-    """缺失模型身份或非正维度会导致向量空间不可安全区分，必须拒绝。"""
+    """缺失身份或非正整数维度会令持久化向量空间不可安全区分，必须拒绝。"""
     with pytest.raises(ValueError):
         EncoderIdentity(encoder, model_name, pretrained, dimension)
 
