@@ -31,7 +31,16 @@
 - 红：扩展参数化测试后，`True`、`1.5`、NaN、Infinity 四例均因未抛出 `ValueError` 失败。
 - 绿：修复后 contract 为 `23 passed`；默认 smoke 为 `1 skipped`；Task 1–3 组合回归为 `51 passed`；`git diff --check` 无输出。
 
+## 质量审查修复
+
+- OpenCLIP 首次初始化失败现会缓存同一个安全异常；并发等待者和后续调用均不会再次导入、创建或下载。异常不回显底层失败文本，但包含 `encoder`、`model`、`pretrained`、`device` 上下文并通过异常链保留原始原因。
+- 已移除工厂、构造和加载阶段对 `os.environ` 的写入。核对本地 `open_clip_torch 3.3.0` 签名后，改为将每个项目的 `.cache/open_clip` 显式作为 `create_model_and_transforms(..., cache_dir=...)` 传入；其源码会继续将该参数传给权重与 Hugging Face 下载路径。
+- 新增 fake-runtime 测试覆盖连续失败、四线程并发失败仅尝试一次、两项目独立 `cache_dir` 与构造/加载不污染 `os.environ`。
+- 红：扩展 fake runtime 为必须接收 `cache_dir` 后，旧实现有 8 项失败，涵盖缺少参数、环境泄漏及失败未缓存。
+- 绿：修复后 contract 为 `26 passed`；默认 smoke 为 `1 skipped`；Task 1–3 组合回归为 `54 passed`；`git diff --check` 无输出。
+
 ## 提交
 
 - 实现提交：`7e7d2967b9f5782b5622fd3f26665bd908cba90c`（`feat: add pluggable image encoders`）。
 - 审查修复提交：`17153380f114498664049ed7ba46dd4a72f85eaa`（`fix: validate encoder identity dimension`）。
+- 质量审查修复提交：`b948b72d0c756673eeb61c8b8511b3fe8fd3a7e9`（`fix: cache encoder initialization failures`）。
