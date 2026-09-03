@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>地毯买家秀智能匹配 · MVP</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CARPET MATCHER / MVP</p>
+        <h1>买家秀智能匹配助手</h1>
+      </div>
+      <div class="stats"><span id="libraryCount">0</span> 条买家秀已入库</div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="kicker">给客服更快、更有依据的推荐</p>
+          <h2>上传客户家的照片，找到最接近的真实场景。</h2>
+          <p>当前仅按图片色调与构图查找相似实拍；商品信息可在后续逐步补充。</p>
+        </div>
+        <button class="ghost" id="seedButton">载入演示数据</button>
+      </section>
+
+      <nav class="tabs" aria-label="功能导航">
+        <button class="tab active" data-view="match">智能匹配</button>
+        <button class="tab" data-view="library">买家秀图库</button>
+      </nav>
+
+      <section id="match" class="view active">
+        <div class="panel upload-panel">
+          <div class="panel-heading">
+            <div><p class="section-label">01 / 客户家居图</p><h3>发来照片后，在这里开始匹配</h3></div>
+            <span class="badge">内部客服使用</span>
+          </div>
+          <label class="dropzone" id="queryDropzone" for="queryImage">
+            <input id="queryImage" type="file" accept="image/*" />
+            <img id="queryPreview" alt="客户家居图预览" hidden />
+            <div class="dropzone-copy"><span class="plus">＋</span><strong>选择或拖入客户家的照片</strong><small>支持 JPG、PNG、WEBP</small></div>
+          </label>
+          <div class="filters">
+            <button id="matchButton" class="primary">开始匹配</button>
+          </div>
+          <p class="hint" id="matchHint">先上传客户图；图库为空时可先载入演示数据或录入真实买家秀。</p>
+        </div>
+        <section id="results" class="results" hidden>
+          <div class="result-title"><div><p class="section-label">02 / 推荐结果</p><h3>最接近的真实买家秀</h3></div><span id="resultCount"></span></div>
+          <div id="resultGrid" class="result-grid"></div>
+        </section>
+      </section>
+
+      <section id="library" class="view">
+        <div class="two-col">
+          <form id="entryForm" class="panel entry-form">
+            <p class="section-label">新增买家秀</p><h3>为图片补全可用的商品信息</h3>
+            <label class="mini-dropzone" for="entryImage"><input id="entryImage" type="file" accept="image/*" required /><span id="entryImageText">＋ 选择买家秀图片</span><img id="entryPreview" alt="买家秀预览" hidden /></label>
+            <div class="form-grid">
+              <label>地毯 SKU（选填）<input id="sku" placeholder="例如 CT-208-CRM" /></label>
+              <label>商品名称（选填）<input id="productName" placeholder="例如 云朵奶油风地毯" /></label>
+              <label>主推规格（选填）<input id="size" placeholder="例如 160×230cm" /></label>
+              <label>参考价（元，选填）<input id="price" type="number" min="0" placeholder="例如 899" /></label>
+              <label>空间（选填）<select id="room"><option value="">未填写</option><option>客厅</option><option>卧室</option><option>玄关</option><option>餐厅</option></select></label>
+              <label>风格（选填）<select id="style"><option value="">未填写</option><option>奶油风</option><option>原木风</option><option>现代简约</option><option>中古风</option><option>轻奢风</option></select></label>
+              <label>主色（选填）<input id="color" placeholder="例如 米白、浅咖" /></label>
+              <label>库存（选填）<select id="stock"><option value="">未填写</option><option value="现货">现货</option><option value="预售">预售</option><option value="缺货">缺货</option></select></label>
+            </div>
+            <label>成交亮点 / 话术依据（选填）<textarea id="sellingPoint" placeholder="例如：短绒易打理，米白色能提亮小户型客厅。"></textarea></label>
+            <button class="primary" type="submit">保存并加入图库</button>
+          </form>
+          <aside class="panel library-list"><div class="panel-heading"><div><p class="section-label">图库列表</p><h3>已入库买家秀</h3></div><button id="clearButton" class="text-button">清空本机数据</button></div><div id="libraryGrid" class="library-grid"></div></aside>
+        </div>
+      </section>
+    </main>
+
+    <template id="resultTemplate"><article class="result-card"><img class="result-image" alt="相似买家秀" /><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div><div class="feedback"><span>这条推荐是否合适？</span><button data-feedback="helpful">合适</button><button data-feedback="not_helpful">不合适</button></div></div></article></template>
+    <script src="matcher-core.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
