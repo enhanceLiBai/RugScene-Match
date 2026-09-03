@@ -1,7 +1,6 @@
 """OpenCLIP 图片编码器的延迟加载适配器。"""
 
 import importlib
-import os
 from threading import Lock
 from typing import Any
 
@@ -12,6 +11,10 @@ from backend.config import Settings
 from backend.encoders.base import EncoderIdentity, normalize_embedding
 
 
+class OpenClipInitializationError(RuntimeError):
+    """OpenCLIP 首次初始化失败后可安全复用的异常。"""
+
+
 class OpenClipEncoder:
     """将 OpenCLIP 模型包装为可替换的图片编码器。"""
 
@@ -19,10 +22,8 @@ class OpenClipEncoder:
         """仅保存配置，不在构造阶段导入或下载模型。"""
         self._settings = settings
         self._runtime: tuple[Any, Any, Any, str, EncoderIdentity] | None = None
+        self._initialization_error: OpenClipInitializationError | None = None
         self._load_lock = Lock()
-
-        # 即使直接实例化适配器，也要在日后导入依赖前固定项目内缓存位置。
-        os.environ.update(settings.cache_environment())
 
     @property
     def identity(self) -> EncoderIdentity:
@@ -39,40 +40,53 @@ class OpenClipEncoder:
         runtime = self._runtime
         if runtime is not None:
             return runtime
+        if self._initialization_error is not None:
+            raise self._initialization_error
 
         with self._load_lock:
             runtime = self._runtime
             if runtime is not None:
                 return runtime
+            if self._initialization_error is not None:
+                raise self._initialization_error
 
-            # OpenCLIP/Torch 的导入可能读取缓存变量，故在导入前再次明确设置。
-            os.environ.update(self._settings.cache_environment())
-            torch = importlib.import_module("torch")
-            open_clip = importlib.import_module("open_clip")
-            device = self._select_device(torch)
-            model, _unused, preprocess = open_clip.create_model_and_transforms(
-                self._settings.clip_model_name,
-                pretrained=self._settings.clip_pretrained,
-                device=device,
-            )
-            model.eval()
+            device = self._settings.model_device
+            try:
+                torch = importlib.import_module("torch")
+                open_clip = importlib.import_module("open_clip")
+                device = self._select_device(torch)
+                model, _unused, preprocess = open_clip.create_model_and_transforms(
+                    self._settings.clip_model_name,
+                    pretrained=self._settings.clip_pretrained,
+                    device=device,
+                    cache_dir=str(self._settings.project_root / ".cache" / "open_clip"),
+                )
+                model.eval()
 
-            # 不写死输出维度；用同一模型的安全空白图探测其真实视觉输出。
-            sample_vector = self._encode_with_runtime(
-                model,
-                preprocess,
-                torch,
-                device,
-                Image.new("RGB", (1, 1)),
-            )
-            identity = EncoderIdentity(
-                encoder="open_clip",
-                model_name=self._settings.clip_model_name,
-                pretrained=self._settings.clip_pretrained,
-                dimension=int(sample_vector.size),
-            )
-            self._runtime = (model, preprocess, torch, device, identity)
-            return self._runtime
+                # 不写死输出维度；用同一模型的安全空白图探测其真实视觉输出。
+                sample_vector = self._encode_with_runtime(
+                    model,
+                    preprocess,
+                    torch,
+                    device,
+                    Image.new("RGB", (1, 1)),
+                )
+                identity = EncoderIdentity(
+                    encoder="open_clip",
+                    model_name=self._settings.clip_model_name,
+                    pretrained=self._settings.clip_pretrained,
+                    dimension=int(sample_vector.size),
+                )
+                self._runtime = (model, preprocess, torch, device, identity)
+                return self._runtime
+            except Exception as exc:
+                error = OpenClipInitializationError(
+                    "初始化图片编码器失败（"
+                    f"encoder=open_clip, model={self._settings.clip_model_name}, "
+                    f"pretrained={self._settings.clip_pretrained}, device={device}）。"
+                )
+                self._initialization_error = error
+                raise error from exc
 
     def _select_device(self, torch: Any) -> str:
         """解析 auto 设备；显式配置由调用方负责其可用性。"""

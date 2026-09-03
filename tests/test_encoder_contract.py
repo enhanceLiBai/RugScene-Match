@@ -1,7 +1,10 @@
 """可替换图片编码器的公开契约测试。"""
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
+from threading import Barrier, Event
 
 import numpy as np
 from PIL import Image
@@ -154,11 +157,13 @@ class FakeOpenClipRuntime:
 
     def __init__(self) -> None:
         self.model = FakeModel()
-        self.create_calls: list[tuple[str, str, str]] = []
+        self.create_calls: list[tuple[str, str, str, str]] = []
         self.preprocess_modes: list[str] = []
 
-    def create_model_and_transforms(self, model_name: str, *, pretrained: str, device: str) -> tuple[FakeModel, None, object]:
-        self.create_calls.append((model_name, pretrained, device))
+    def create_model_and_transforms(
+        self, model_name: str, *, pretrained: str, device: str, cache_dir: str
+    ) -> tuple[FakeModel, None, object]:
+        self.create_calls.append((model_name, pretrained, device, cache_dir))
 
         def preprocess(image: Image.Image) -> FakeTensor:
             self.preprocess_modes.append(image.mode)
@@ -219,7 +224,7 @@ def test_open_clip_loads_once_uses_rgb_and_inference_mode(tmp_path: Path, monkey
     assert second_identity == first_identity
     assert vector.tolist() == pytest.approx([0.6, 0.8, 0.0])
     assert imported == ["torch", "open_clip"]
-    assert open_clip.create_calls == [("ViT-B-32", "openai", "cpu")]
+    assert open_clip.create_calls == [("ViT-B-32", "openai", "cpu", str(tmp_path / ".cache" / "open_clip"))]
     assert open_clip.model.eval_calls == 1
     assert open_clip.model.encode_calls == 2
     assert torch.mode.entries == 2
@@ -251,16 +256,132 @@ def test_open_clip_selects_configured_device(
     encoder = OpenClipEncoder(make_settings(tmp_path, monkeypatch, model_device=requested))
 
     assert encoder.identity.dimension == 3
-    assert open_clip.create_calls == [("ViT-B-32", "openai", expected)]
+    assert open_clip.create_calls == [("ViT-B-32", "openai", expected, str(tmp_path / ".cache" / "open_clip"))]
 
 
-def test_factory_applies_project_cache_before_constructing_open_clip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """工厂必须在 OpenCLIP 有机会导入前固定项目内缓存位置。"""
+def test_factory_construction_does_not_change_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """工厂和构造不得泄漏缓存配置到长驻工作进程的全局环境。"""
     settings = make_settings(tmp_path, monkeypatch)
-    for name in settings.cache_environment():
-        monkeypatch.delenv(name, raising=False)
+    before = dict(os.environ)
 
     encoder = create_encoder(settings)
 
     assert isinstance(encoder, OpenClipEncoder)
-    assert {name: __import__("os").environ[name] for name in settings.cache_environment()} == settings.cache_environment()
+    assert dict(os.environ) == before
+
+
+def test_open_clip_loads_each_project_cache_without_environment_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不同项目的模型加载必须分别传入 cache_dir，且不改变进程环境。"""
+    import backend.encoders.open_clip as open_clip_module
+
+    torch = FakeTorchRuntime(cuda_available=False)
+    open_clip = FakeOpenClipRuntime()
+    monkeypatch.setattr(
+        open_clip_module.importlib,
+        "import_module",
+        lambda name: {"torch": torch, "open_clip": open_clip}[name],
+    )
+    first = OpenClipEncoder(make_settings(tmp_path / "first", monkeypatch))
+    second = OpenClipEncoder(make_settings(tmp_path / "second", monkeypatch))
+    before = dict(os.environ)
+
+    assert first.identity.dimension == 3
+    assert second.identity.dimension == 3
+
+    assert dict(os.environ) == before
+    assert open_clip.create_calls == [
+        ("ViT-B-32", "openai", "cpu", str(tmp_path / "first" / ".cache" / "open_clip")),
+        ("ViT-B-32", "openai", "cpu", str(tmp_path / "second" / ".cache" / "open_clip")),
+    ]
+
+
+class FailingOpenClipRuntime:
+    """模拟创建模型失败，确认失败不会反复触发下载。"""
+
+    def __init__(self) -> None:
+        self.create_calls: list[tuple[str, str, str, str]] = []
+
+    def create_model_and_transforms(self, model_name: str, *, pretrained: str, device: str, cache_dir: str) -> object:
+        self.create_calls.append((model_name, pretrained, device, cache_dir))
+        raise RuntimeError("internal download detail")
+
+
+def test_open_clip_caches_initialization_failure_without_leaking_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一次失败后后续调用必须复用安全异常，避免重复导入或下载。"""
+    import backend.encoders.open_clip as open_clip_module
+
+    torch = FakeTorchRuntime(cuda_available=False)
+    open_clip = FailingOpenClipRuntime()
+    imported: list[str] = []
+
+    def import_runtime(name: str) -> object:
+        imported.append(name)
+        return {"torch": torch, "open_clip": open_clip}[name]
+
+    monkeypatch.setattr(open_clip_module.importlib, "import_module", import_runtime)
+    encoder = OpenClipEncoder(make_settings(tmp_path, monkeypatch))
+
+    with pytest.raises(RuntimeError) as first_error:
+        _ = encoder.identity
+    with pytest.raises(RuntimeError) as second_error:
+        encoder.encode(Image.new("RGB", (1, 1)))
+
+    message = str(first_error.value)
+    assert str(second_error.value) == message
+    assert "internal download detail" not in message
+    assert "encoder=open_clip" in message
+    assert "model=ViT-B-32" in message
+    assert "pretrained=openai" in message
+    assert "device=cpu" in message
+    assert imported == ["torch", "open_clip"]
+    assert len(open_clip.create_calls) == 1
+
+
+class BlockingFailingOpenClipRuntime(FailingOpenClipRuntime):
+    """让并发访问同时到达首次初始化边界。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def create_model_and_transforms(self, model_name: str, *, pretrained: str, device: str, cache_dir: str) -> object:
+        self.create_calls.append((model_name, pretrained, device, cache_dir))
+        self.started.set()
+        assert self.release.wait(timeout=2)
+        raise RuntimeError("internal download detail")
+
+
+def test_open_clip_concurrent_initialization_failure_attempts_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发等待者必须共享首次失败，不能各自重试模型初始化。"""
+    import backend.encoders.open_clip as open_clip_module
+
+    torch = FakeTorchRuntime(cuda_available=False)
+    open_clip = BlockingFailingOpenClipRuntime()
+    monkeypatch.setattr(
+        open_clip_module.importlib,
+        "import_module",
+        lambda name: {"torch": torch, "open_clip": open_clip}[name],
+    )
+    encoder = OpenClipEncoder(make_settings(tmp_path, monkeypatch))
+    barrier = Barrier(4)
+
+    def load_identity() -> EncoderIdentity:
+        barrier.wait(timeout=2)
+        return encoder.identity
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(load_identity) for _ in range(4)]
+        assert open_clip.started.wait(timeout=2)
+        open_clip.release.set()
+        errors = [future.exception(timeout=2) for future in futures]
+
+    assert len(open_clip.create_calls) == 1
+    assert all(isinstance(error, RuntimeError) for error in errors)
+    assert len({str(error) for error in errors}) == 1
