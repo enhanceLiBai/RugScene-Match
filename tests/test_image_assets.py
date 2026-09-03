@@ -1,11 +1,14 @@
 """图片资产校验与安全落盘的行为测试。"""
 
+from dataclasses import replace
 import hashlib
 from pathlib import Path
+import warnings
 
 import pytest
 from PIL import Image
 
+import backend.image_assets as image_assets
 from backend.image_assets import InvalidImageError, store_image, validate_image, validate_image_bytes
 
 
@@ -85,6 +88,52 @@ def test_validate_image_rejects_content_format_that_disagrees_with_filename(tmp_
         validate_image(source)
 
 
+def test_validate_image_rejects_pixel_limit_before_loading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """超过应用像素上限的图片必须在 Pillow 解码像素前被拒绝。"""
+    source = make_png(tmp_path / "large.png")
+    monkeypatch.setattr(image_assets, "MAX_IMAGE_PIXELS", 50, raising=False)
+
+    def load_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("load must not run for oversized image")
+
+    monkeypatch.setattr(Image.Image, "load", load_must_not_run)
+
+    with pytest.raises(InvalidImageError, match="large.png"):
+        validate_image(source)
+
+
+def test_validate_image_converts_decompression_bomb_warning_to_invalid_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pillow 解压炸弹警告必须成为安全的业务校验错误。"""
+    source = make_png(tmp_path / "warning.png")
+    real_open = Image.open
+
+    def open_with_warning(*args: object, **kwargs: object) -> Image.Image:
+        warnings.warn("simulated bomb warning", Image.DecompressionBombWarning, stacklevel=2)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(image_assets.Image, "open", open_with_warning)
+
+    with pytest.raises(InvalidImageError, match="warning.png"):
+        validate_image(source)
+
+
+def test_validate_image_converts_decompression_bomb_error_to_invalid_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pillow 解压炸弹错误必须成为安全的业务校验错误。"""
+    source = make_png(tmp_path / "error.png")
+
+    def open_with_error(*_args: object, **_kwargs: object) -> Image.Image:
+        raise Image.DecompressionBombError("simulated bomb error")
+
+    monkeypatch.setattr(image_assets.Image, "open", open_with_error)
+
+    with pytest.raises(InvalidImageError, match="error.png"):
+        validate_image(source)
+
+
 def test_store_image_uses_hash_name_and_does_not_overwrite(tmp_path: Path) -> None:
     """首次存储写入已校验字节，重复调用保持幂等。"""
     source = make_png(tmp_path / "source.png")
@@ -96,6 +145,31 @@ def test_store_image_uses_hash_name_and_does_not_overwrite(tmp_path: Path) -> No
     assert first == second
     assert first.name == f"{validated.sha256}.png"
     assert first.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda image: replace(image, sha256="a" * 63),
+        lambda image: replace(image, sha256=image.sha256.upper()),
+        lambda image: replace(image, sha256="0" * 64),
+        lambda image: replace(image, extension=".txt"),
+        lambda image: replace(image, extension=".png/../../escaped"),
+    ],
+)
+def test_store_image_rejects_forged_metadata_before_creating_library(
+    tmp_path: Path, mutate: object
+) -> None:
+    """伪造哈希或扩展名时，绝不能创建图库或写入路径范围外文件。"""
+    source = make_png(tmp_path / "source.png")
+    validated = mutate(validate_image(source))
+    image_dir = tmp_path / "library"
+
+    with pytest.raises(InvalidImageError):
+        store_image(source, validated, image_dir)
+
+    assert not image_dir.exists()
+    assert not (tmp_path / "escaped").exists()
 
 
 def test_store_image_keeps_existing_hash_target_unchanged(tmp_path: Path) -> None:
@@ -144,6 +218,54 @@ def test_store_image_uses_validated_bytes_after_source_changes(tmp_path: Path) -
     stored = store_image(source, validated, tmp_path / "library")
 
     assert stored.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure_point", ["write", "flush", "fsync"])
+def test_store_image_cleans_temporary_file_when_writing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str
+) -> None:
+    """临时文件任一写入阶段失败后，都不能在图库中遗留文件。"""
+    source = make_png(tmp_path / "source.png")
+    validated = validate_image(source)
+    image_dir = tmp_path / "library"
+    controlled_temp = image_dir / ".controlled.tmp"
+    real_fsync = __import__("os").fsync
+
+    class FailingTemporaryFile:
+        def __enter__(self) -> "FailingTemporaryFile":
+            image_dir.mkdir(exist_ok=True)
+            self.file = controlled_temp.open("wb")
+            self.name = str(controlled_temp)
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.file.close()
+
+        def write(self, data: bytes) -> int:
+            if failure_point == "write":
+                raise OSError("simulated write failure")
+            return self.file.write(data)
+
+        def flush(self) -> None:
+            if failure_point == "flush":
+                raise OSError("simulated flush failure")
+            self.file.flush()
+
+        def fileno(self) -> int:
+            return self.file.fileno()
+
+    def fake_fsync(descriptor: int) -> None:
+        if failure_point == "fsync":
+            raise OSError("simulated fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr("backend.image_assets.tempfile.NamedTemporaryFile", lambda **_kwargs: FailingTemporaryFile())
+    monkeypatch.setattr("backend.image_assets.os.fsync", fake_fsync)
+
+    with pytest.raises(OSError, match=f"simulated {failure_point} failure"):
+        store_image(source, validated, image_dir)
+
+    assert list(image_dir.glob(".*.tmp")) == []
 
 
 def test_store_image_cleans_temporary_files_when_link_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

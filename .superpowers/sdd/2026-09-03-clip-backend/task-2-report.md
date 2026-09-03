@@ -23,3 +23,11 @@
 ## 提交
 
 - 图片资产实现与测试提交：`c712650b817ae715a44e0ec36af0e6822cf26821`
+
+## 审查修复（追加提交）
+
+- 存储前重新计算 `raw_bytes` 的 SHA-256；仅接受计算结果一致的 64 位小写十六进制哈希，扩展名仅允许 `.jpg`、`.png`、`.webp`，并确认解析后的目标仍在图库根目录内。
+- 临时文件进入上下文后立即记录路径；`write`、`flush`、`fsync` 任一步失败均由 `finally` 清理。
+- 新增 `MAX_IMAGE_PIXELS = 50_000_000`。在 `load()`/`convert()` 前核对实际 Pillow 格式、扩展名和像素数量，并将解压炸弹警告与错误统一转换为 `InvalidImageError`。
+- RED：伪造元数据 5 项、临时写入故障 3 项、资源限制/异常分类 3 项均先在旧实现失败。
+- GREEN：`.venv\\Scripts\\python.exe -m pytest tests/test_image_assets.py -v`，23 passed；`.venv\\Scripts\\python.exe -m pytest tests/test_config.py tests/test_image_assets.py -q`，28 passed；`git diff --check` 无输出。

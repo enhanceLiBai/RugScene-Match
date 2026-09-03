@@ -6,6 +6,7 @@ import hashlib
 import os
 from pathlib import Path, PureWindowsPath
 import tempfile
+import warnings
 
 from PIL import Image, UnidentifiedImageError
 
@@ -16,6 +17,7 @@ _FORMAT_DETAILS = {
     "WEBP": ("image/webp", ".webp", {".webp"}),
 }
 _SUPPORTED_EXTENSIONS = frozenset(extension for _, _, extensions in _FORMAT_DETAILS.values() for extension in extensions)
+MAX_IMAGE_PIXELS = 50_000_000
 
 
 class InvalidImageError(ValueError):
@@ -68,23 +70,36 @@ def validate_image_bytes(data: bytes, original_name: str) -> ValidatedImage:
         raise InvalidImageError(f"图片内容为空：{safe_name}")
 
     try:
-        with Image.open(BytesIO(data)) as verified_image:
-            verified_image.verify()
-        with Image.open(BytesIO(data)) as opened_image:
-            image_format = opened_image.format
-            opened_image.load()
-            image = opened_image.convert("RGB")
-    except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as error:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as verified_image:
+                image_format = verified_image.format
+                details = _FORMAT_DETAILS.get(image_format or "")
+                if details is None:
+                    raise InvalidImageError(f"不支持的图片内容格式：{safe_name}")
+                mime_type, extension, compatible_extensions = details
+                if supplied_extension not in compatible_extensions:
+                    raise InvalidImageError(f"图片扩展名与内容格式不一致：{safe_name}")
+                if verified_image.width <= 0 or verified_image.height <= 0:
+                    raise InvalidImageError(f"图片尺寸无效：{safe_name}")
+                # 尺寸检查位于完整解码前，防止压缩炸弹耗尽服务内存。
+                if verified_image.width * verified_image.height > MAX_IMAGE_PIXELS:
+                    raise InvalidImageError(f"图片像素数量超过上限：{safe_name}")
+                verified_image.verify()
+            with Image.open(BytesIO(data)) as opened_image:
+                if opened_image.format != image_format:
+                    raise InvalidImageError(f"图片内容格式不稳定：{safe_name}")
+                opened_image.load()
+                image = opened_image.convert("RGB")
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+        SyntaxError,
+    ) as error:
         raise InvalidImageError(f"图片内容无效：{safe_name}") from error
-
-    details = _FORMAT_DETAILS.get(image_format or "")
-    if details is None:
-        raise InvalidImageError(f"不支持的图片内容格式：{safe_name}")
-    mime_type, extension, compatible_extensions = details
-    if supplied_extension not in compatible_extensions:
-        raise InvalidImageError(f"图片扩展名与内容格式不一致：{safe_name}")
-    if image.width <= 0 or image.height <= 0:
-        raise InvalidImageError(f"图片尺寸无效：{safe_name}")
 
     return ValidatedImage(
         sha256=hashlib.sha256(data).hexdigest(),
@@ -101,8 +116,18 @@ def validate_image_bytes(data: bytes, original_name: str) -> ValidatedImage:
 def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Path:
     """将已验证字节原子写入哈希路径，既有文件永不覆盖。"""
     del source  # 落盘只使用校验时保留的字节，防止源文件被替换后出现 TOCTOU 不一致。
+    expected_sha256 = hashlib.sha256(validated.raw_bytes).hexdigest()
+    if validated.sha256 != expected_sha256:
+        raise InvalidImageError("图片哈希与已校验内容不一致")
+    if validated.extension not in {".jpg", ".png", ".webp"}:
+        raise InvalidImageError("图片存储扩展名无效")
+
+    library_root = image_dir.resolve()
+    target = (library_root / f"{validated.sha256}{validated.extension}").resolve()
+    # 即使未来字段来源变化，也不允许元数据把落盘目标带出图库根目录。
+    if not target.is_relative_to(library_root):
+        raise InvalidImageError("图片存储路径超出图库目录")
     image_dir.mkdir(parents=True, exist_ok=True)
-    target = image_dir / f"{validated.sha256}{validated.extension}"
     if target.exists():
         return target
 
@@ -111,10 +136,10 @@ def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Pat
         with tempfile.NamedTemporaryFile(
             mode="wb", dir=image_dir, prefix=".", suffix=".tmp", delete=False
         ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
             temporary_file.write(validated.raw_bytes)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-            temporary_path = Path(temporary_file.name)
         # 硬链接仅在目标不存在时成功，避免并发导入覆盖先完成的同哈希文件。
         try:
             os.link(temporary_path, target)
