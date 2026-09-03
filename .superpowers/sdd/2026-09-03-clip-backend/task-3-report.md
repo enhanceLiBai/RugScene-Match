@@ -25,6 +25,13 @@
 - 单元测试以 fake runtime 覆盖延迟加载、只加载一次、RGB 转换、`eval()`、推理上下文、设备选择和项目内缓存；未联网。
 - 未触碰数据库、服务、API 或任何凭据文件。
 
+## 审查修复
+
+- 规格审查指出 `EncoderIdentity.dimension` 原先会接受 `True`、浮点数、NaN 和 Infinity。该字段是持久化向量空间键，现仅接受非布尔的正整数。
+- 红：扩展参数化测试后，`True`、`1.5`、NaN、Infinity 四例均因未抛出 `ValueError` 失败。
+- 绿：修复后 contract 为 `23 passed`；默认 smoke 为 `1 skipped`；Task 1–3 组合回归为 `51 passed`；`git diff --check` 无输出。
+
 ## 提交
 
 - 实现提交：`7e7d2967b9f5782b5622fd3f26665bd908cba90c`（`feat: add pluggable image encoders`）。
+- 审查修复提交：`17153380f114498664049ed7ba46dd4a72f85eaa`（`fix: validate encoder identity dimension`）。
