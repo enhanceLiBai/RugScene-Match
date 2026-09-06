@@ -106,11 +106,11 @@ def fake_encoder() -> FakeEncoder:
 
 @pytest.fixture
 def frontend_root(tmp_path: Path) -> Path:
-    """构造只包含白名单入口的前端目录，避免依赖测试项目根目录。"""
+    """复制真实首页并隔离其余静态资源，验证入口契约和白名单路由。"""
     root = tmp_path / "frontend"
     root.mkdir()
     (root / "index.html").write_text(
-        '<!doctype html><script src="/api-client.js"></script>',
+        (Path(__file__).parents[1] / "index.html").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     (root / "styles.css").write_text("body { color: black; }", encoding="utf-8")
@@ -396,7 +396,12 @@ def test_library_upload_rejects_invalid_input_without_internal_details(
 def test_root_serves_frontend_and_only_registered_assets(client: TestClient) -> None:
     """若挂载整个目录，未注册配置文件可能被同源静态路由暴露。"""
     assert client.get("/").status_code == 200
-    assert "api-client.js" in client.get("/").text
+    html = client.get("/").text
+    assert '<script src="api-client.js"></script>' in html
+    assert 'id="seedButton"' not in html
+    assert 'id="clearButton"' not in html
+    assert 'id="entryStatus"' in html
+    assert 'id="reloadLibraryButton"' in html
     assert client.get("/styles.css").headers["content-type"].startswith("text/css")
     assert client.get("/matcher-core.js").status_code == 200
     assert client.get("/api-client.js").status_code == 200

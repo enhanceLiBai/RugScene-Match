@@ -20,9 +20,8 @@
         <div>
           <p class="kicker">给客服更快、更有依据的推荐</p>
           <h2>上传客户家的照片，找到最接近的真实场景。</h2>
-          <p>当前仅按图片色调与构图查找相似实拍；商品信息可在后续逐步补充。</p>
+          <p>系统使用 OpenCLIP 图片向量查找相似实拍；商品信息可在后续逐步补充。</p>
         </div>
-        <button class="ghost" id="seedButton">载入演示数据</button>
       </section>
 
       <nav class="tabs" aria-label="功能导航">
@@ -44,7 +43,7 @@
           <div class="filters">
             <button id="matchButton" class="primary">开始匹配</button>
           </div>
-          <p class="hint" id="matchHint">先上传客户图；图库为空时可先载入演示数据或录入真实买家秀。</p>
+          <p class="hint" id="matchHint" aria-live="polite">先上传客户图；图库为空时请先录入真实买家秀。</p>
         </div>
         <section id="results" class="results" hidden>
           <div class="result-title"><div><p class="section-label">02 / 推荐结果</p><h3>最接近的真实买家秀</h3></div><span id="resultCount"></span></div>
@@ -68,15 +67,24 @@
               <label>库存（选填）<select id="stock"><option value="">未填写</option><option value="现货">现货</option><option value="预售">预售</option><option value="缺货">缺货</option></select></label>
             </div>
             <label>成交亮点 / 话术依据（选填）<textarea id="sellingPoint" placeholder="例如：短绒易打理，米白色能提亮小户型客厅。"></textarea></label>
-            <button class="primary" type="submit">保存并加入图库</button>
+            <button class="primary" id="entrySubmitButton" type="submit">保存并加入图库</button>
+            <p class="status-message" id="entryStatus" aria-live="polite" hidden></p>
           </form>
-          <aside class="panel library-list"><div class="panel-heading"><div><p class="section-label">图库列表</p><h3>已入库买家秀</h3></div><button id="clearButton" class="text-button">清空本机数据</button></div><div id="libraryGrid" class="library-grid"></div></aside>
+          <aside class="panel library-list">
+            <div class="panel-heading">
+              <div><p class="section-label">图库列表</p><h3>已入库买家秀</h3></div>
+              <button id="reloadLibraryButton" class="retry-button" type="button">刷新图库</button>
+            </div>
+            <p class="status-message" id="libraryStatus" aria-live="polite" hidden></p>
+            <div id="libraryGrid" class="library-grid"></div>
+          </aside>
         </div>
       </section>
     </main>
 
     <template id="resultTemplate"><article class="result-card"><img class="result-image" alt="相似买家秀" /><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div><div class="feedback"><span>这条推荐是否合适？</span><button data-feedback="helpful">合适</button><button data-feedback="not_helpful">不合适</button></div></div></article></template>
     <script src="matcher-core.js"></script>
+    <script src="api-client.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
