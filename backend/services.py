@@ -12,7 +12,13 @@ import numpy as np
 from sqlalchemy import select
 
 from backend.encoders.base import EncoderIdentity, ImageEncoder
-from backend.image_assets import ValidatedImage, _SUPPORTED_EXTENSIONS, store_image, validate_image, validate_image_bytes
+from backend.image_assets import (
+    ValidatedImage,
+    _SUPPORTED_EXTENSIONS,
+    store_image_with_ownership,
+    validate_image,
+    validate_image_bytes,
+)
 from backend.models import ImageEmbedding, ImageRecord
 from backend.repository import ImageMetadata, ImageRepository, SearchRow
 
@@ -136,11 +142,10 @@ class LibraryService:
             image = self.repository.find_by_sha256(validated.sha256)
 
             if image is None:
-                target = self.image_dir / f"{validated.sha256}{validated.extension}"
-                existed_before = target.exists()
-                stored_path = store_image(source_label, validated, self.image_dir)
-                # 仅清理本次开始前不存在的目标；已有图库文件永远不受失败事务影响。
-                created_library_file = not existed_before
+                stored = store_image_with_ownership(source_label, validated, self.image_dir)
+                stored_path = stored.path
+                # 仅原子创建成功的调用拥有清理该文件的权利。
+                created_library_file = stored.created
                 image = self.repository.add_image(
                     original_name=validated.original_name,
                     stored_path=self._relative_stored_path(stored_path),

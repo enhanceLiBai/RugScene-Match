@@ -12,7 +12,7 @@ from PIL import Image
 import pytest
 
 from backend.encoders.base import EncoderIdentity, normalize_embedding
-from backend.image_assets import validate_image
+from backend.image_assets import validate_image, validate_image_bytes
 from backend.repository import ImageMetadata, SearchRow
 from backend.services import ImportStatus, LibraryService
 
@@ -199,6 +199,32 @@ def test_import_bytes_encoding_failure_rolls_back_and_removes_only_new_file(
     assert result.image_id is None
     assert not any(path.name != "sentinel.png" for path in (tmp_path / "library").iterdir())
     assert sentinel.read_bytes() == b"keep"
+    assert repository.rollbacks == 1
+
+
+def test_import_bytes_race_failure_keeps_file_created_by_other_request(
+    service: LibraryService, repository: FakeRepository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """链接瞬间由其他请求创建目标时，本请求失败不得删除对方文件。"""
+    data = png_bytes("blue")
+    validated = validate_image_bytes(data, "buyer.png")
+    target = tmp_path / "library" / f"{validated.sha256}.png"
+
+    def competitor_wins(_temporary: object, destination: object, *_args: object, **_kwargs: object) -> None:
+        Path(destination).write_bytes(b"concurrent-library-content")
+        raise FileExistsError
+
+    class FailingEncoder(FakeEncoder):
+        def encode(self, _image: Image.Image) -> np.ndarray:
+            raise RuntimeError("编码失败")
+
+    monkeypatch.setattr("backend.image_assets.os.link", competitor_wins)
+    service.encoder = FailingEncoder()
+
+    result = service.import_bytes(data, "buyer.png", ImageMetadata())
+
+    assert result.status is ImportStatus.FAILED
+    assert target.read_bytes() == b"concurrent-library-content"
     assert repository.rollbacks == 1
 
 

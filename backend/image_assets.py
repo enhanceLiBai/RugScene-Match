@@ -38,6 +38,14 @@ class ValidatedImage:
     raw_bytes: bytes
 
 
+@dataclass(frozen=True)
+class StoredImage:
+    """原子落盘的结果；created 仅在本调用成功创建目标时为真。"""
+
+    path: Path
+    created: bool
+
+
 def _safe_name(original_name: str) -> str:
     """仅保留文件名，避免把调用方提供的路径回显到异常中。"""
     name = PureWindowsPath(original_name).name
@@ -115,6 +123,11 @@ def validate_image_bytes(data: bytes, original_name: str) -> ValidatedImage:
 
 def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Path:
     """将已验证字节原子写入哈希路径，既有文件永不覆盖。"""
+    return store_image_with_ownership(source, validated, image_dir).path
+
+
+def store_image_with_ownership(source: Path, validated: ValidatedImage, image_dir: Path) -> StoredImage:
+    """落盘并返回原子创建归属，供失败补偿安全判断是否可以删除。"""
     del source  # 落盘只使用校验时保留的字节，防止源文件被替换后出现 TOCTOU 不一致。
     expected_sha256 = hashlib.sha256(validated.raw_bytes).hexdigest()
     if validated.sha256 != expected_sha256:
@@ -129,7 +142,7 @@ def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Pat
         raise InvalidImageError("图片存储路径超出图库目录")
     image_dir.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        return target
+        return StoredImage(target, created=False)
 
     temporary_path: Path | None = None
     try:
@@ -144,7 +157,7 @@ def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Pat
         try:
             os.link(temporary_path, target)
         except FileExistsError:
-            return target
+            return StoredImage(target, created=False)
         else:
             temporary_path.unlink()
             temporary_path = None
@@ -152,4 +165,4 @@ def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Pat
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
 
-    return target
+    return StoredImage(target, created=True)
