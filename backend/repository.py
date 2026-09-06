@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Final
@@ -14,6 +15,21 @@ from sqlalchemy.orm import Session
 
 from backend.encoders.base import EncoderIdentity
 from backend.models import ImageEmbedding, ImageRecord
+
+
+@dataclass(frozen=True)
+class ImageMetadata:
+    """图片的九个选填商品字段；更新时 None 表示不覆盖已有值。"""
+
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: Decimal | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +49,15 @@ class SearchRow:
     dimension: int
     cosine_distance: float
     similarity_percent: float
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: Decimal | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +71,15 @@ class LibraryRow:
     width: int
     height: int
     models: tuple[EncoderIdentity, ...]
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: Decimal | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 _VECTOR_DTYPE: Final = np.dtype(np.float32)
@@ -128,6 +162,24 @@ class ImageRepository:
         """按主键稳定列出图片，方便后续图库接口分页扩展。"""
         return list(self._session.scalars(select(ImageRecord).order_by(ImageRecord.id.asc())))
 
+    def update_metadata(self, image: ImageRecord, metadata: ImageMetadata) -> None:
+        """只更新非 None 字段，支持重复入库时逐步补充商品资料。"""
+        for field in (
+            "sku",
+            "product_name",
+            "size",
+            "price",
+            "room",
+            "style",
+            "color",
+            "stock",
+            "selling_point",
+        ):
+            value = getattr(metadata, field)
+            if value is not None:
+                setattr(image, field, value)
+        self._session.flush()
+
     def find_by_id(self, image_id: int) -> ImageRecord | None:
         """按主键查找图片元数据，供受控图库文件读取使用。"""
         return self._session.get(ImageRecord, image_id)
@@ -157,6 +209,15 @@ class ImageRepository:
                     width=image.width,
                     height=image.height,
                     models=(),
+                    sku=image.sku,
+                    product_name=image.product_name,
+                    size=image.size,
+                    price=image.price,
+                    room=image.room,
+                    style=image.style,
+                    color=image.color,
+                    stock=image.stock,
+                    selling_point=image.selling_point,
                 )
             if embedding is not None:
                 existing = LibraryRow(
@@ -175,6 +236,15 @@ class ImageRepository:
                             dimension=embedding.dimension,
                         ),
                     ),
+                    sku=existing.sku,
+                    product_name=existing.product_name,
+                    size=existing.size,
+                    price=existing.price,
+                    room=existing.room,
+                    style=existing.style,
+                    color=existing.color,
+                    stock=existing.stock,
+                    selling_point=existing.selling_point,
                 )
             records[image.id] = existing
         return list(records.values())
@@ -260,6 +330,15 @@ class ImageRepository:
                     dimension=embedding.dimension,
                     cosine_distance=cosine_distance,
                     similarity_percent=cosine_distance_to_percent(cosine_distance),
+                    sku=image.sku,
+                    product_name=image.product_name,
+                    size=image.size,
+                    price=image.price,
+                    room=image.room,
+                    style=image.style,
+                    color=image.color,
+                    stock=image.stock,
+                    selling_point=image.selling_point,
                 )
             )
         return results

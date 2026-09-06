@@ -35,6 +35,7 @@ def create_database_and_schema(settings: Settings) -> None:
             Base.metadata.create_all(connection)
             _upgrade_sha256_column(connection)
             _ensure_sha256_check_constraint(connection)
+            _upgrade_image_metadata_columns(connection)
     finally:
         engine.dispose()
 
@@ -92,4 +93,40 @@ def _ensure_sha256_check_constraint(connection: Connection) -> None:
         raise RuntimeError("现有 images.sha256 含无效哈希，拒绝自动添加格式约束。")
     connection.execute(
         text("ALTER TABLE images ADD CONSTRAINT ck_images_sha256_lower_hex CHECK (sha256 ~ '^[0-9a-f]{64}$')")
+    )
+
+
+def _upgrade_image_metadata_columns(connection: Connection) -> None:
+    """为旧 images 表幂等补齐选填商品元数据，并安全添加价格约束。"""
+    for statement in (
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS sku TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS product_name TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS size TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS price NUMERIC(12, 2)",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS room TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS style TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS color TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS stock TEXT",
+        "ALTER TABLE images ADD COLUMN IF NOT EXISTS selling_point TEXT",
+    ):
+        connection.execute(text(statement))
+
+    constraint_exists = connection.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+            "WHERE conname = 'ck_images_price_nonnegative' AND conrelid = 'images'::regclass)"
+        )
+    ).scalar_one()
+    if constraint_exists:
+        return
+    has_invalid_price = connection.execute(
+        text("SELECT EXISTS (SELECT 1 FROM images WHERE price IS NOT NULL AND price < 0)")
+    ).scalar_one()
+    if has_invalid_price:
+        raise RuntimeError("现有 images.price 含负数，拒绝自动添加非负价格约束。")
+    connection.execute(
+        text(
+            "ALTER TABLE images ADD CONSTRAINT ck_images_price_nonnegative "
+            "CHECK (price IS NULL OR price >= 0)"
+        )
     )

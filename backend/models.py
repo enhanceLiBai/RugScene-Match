@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from pgvector.sqlalchemy import VECTOR
-from sqlalchemy import BigInteger, CHAR, CheckConstraint, DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, CHAR, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -21,6 +22,7 @@ class ImageRecord(Base):
         CheckConstraint("width > 0", name="ck_images_width_positive"),
         CheckConstraint("height > 0", name="ck_images_height_positive"),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_images_sha256_lower_hex"),
+        CheckConstraint("price IS NULL OR price >= 0", name="ck_images_price_nonnegative"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -30,6 +32,15 @@ class ImageRecord(Base):
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
+    sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    product_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    room: Mapped[str | None] = mapped_column(Text, nullable=True)
+    style: Mapped[str | None] = mapped_column(Text, nullable=True)
+    color: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stock: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selling_point: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     embeddings: Mapped[list["ImageEmbedding"]] = relationship(
         back_populates="image",
