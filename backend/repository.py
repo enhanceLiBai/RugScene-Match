@@ -35,6 +35,19 @@ class SearchRow:
     similarity_percent: float
 
 
+@dataclass(frozen=True)
+class LibraryRow:
+    """图库接口所需的一张图片及其已持久化的模型身份。"""
+
+    image_id: int
+    original_name: str
+    stored_path: str
+    mime_type: str
+    width: int
+    height: int
+    models: tuple[EncoderIdentity, ...]
+
+
 _VECTOR_DTYPE: Final = np.dtype(np.float32)
 _SHA256_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
 
@@ -114,6 +127,57 @@ class ImageRepository:
     def list_images(self) -> list[ImageRecord]:
         """按主键稳定列出图片，方便后续图库接口分页扩展。"""
         return list(self._session.scalars(select(ImageRecord).order_by(ImageRecord.id.asc())))
+
+    def find_by_id(self, image_id: int) -> ImageRecord | None:
+        """按主键查找图片元数据，供受控图库文件读取使用。"""
+        return self._session.get(ImageRecord, image_id)
+
+    def list_library(self) -> list[LibraryRow]:
+        """稳定列出图片及全部已有模型身份，避免 API 逐图查询向量。"""
+        statement = (
+            select(ImageRecord, ImageEmbedding)
+            .outerjoin(ImageEmbedding, ImageEmbedding.image_id == ImageRecord.id)
+            .order_by(
+                ImageRecord.id.asc(),
+                ImageEmbedding.encoder.asc(),
+                ImageEmbedding.model_name.asc(),
+                ImageEmbedding.pretrained.asc(),
+                ImageEmbedding.dimension.asc(),
+            )
+        )
+        records: dict[int, LibraryRow] = {}
+        for image, embedding in self._session.execute(statement):
+            existing = records.get(image.id)
+            if existing is None:
+                existing = LibraryRow(
+                    image_id=image.id,
+                    original_name=image.original_name,
+                    stored_path=image.stored_path,
+                    mime_type=image.mime_type,
+                    width=image.width,
+                    height=image.height,
+                    models=(),
+                )
+            if embedding is not None:
+                existing = LibraryRow(
+                    image_id=existing.image_id,
+                    original_name=existing.original_name,
+                    stored_path=existing.stored_path,
+                    mime_type=existing.mime_type,
+                    width=existing.width,
+                    height=existing.height,
+                    models=existing.models
+                    + (
+                        EncoderIdentity(
+                            encoder=embedding.encoder,
+                            model_name=embedding.model_name,
+                            pretrained=embedding.pretrained,
+                            dimension=embedding.dimension,
+                        ),
+                    ),
+                )
+            records[image.id] = existing
+        return list(records.values())
 
     def image_count(self) -> int:
         """返回当前事务可见的图片数。"""
