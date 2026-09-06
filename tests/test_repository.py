@@ -158,6 +158,12 @@ def test_old_schema_metadata_upgrade_is_repeatable_and_preserves_existing_image(
         )
     ).scalars().all()
     assert columns == ["color", "price", "product_name", "room", "selling_point", "size", "sku", "stock", "style"]
+    assert db_session.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+            "WHERE conname = 'ck_images_price_nonnegative' AND conrelid = 'images'::regclass)"
+        )
+    ).scalar_one()
 
 
 def test_dispose_session_factory_disposes_its_bound_engine() -> None:
