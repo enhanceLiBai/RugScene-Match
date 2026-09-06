@@ -22,7 +22,6 @@ async function refreshLibrary() {
     renderLibrary(payload.images || []);
     setStatus($('#libraryStatus'), '');
   } catch (error) {
-    renderLibrary([]);
     setStatus($('#libraryStatus'), error.message || '图库加载失败，请稍后重试。', 'error');
   } finally {
     setBusy(button, false, '刷新中…');
@@ -171,14 +170,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const button = $('#matchButton');
+    const input = $('#queryImage');
+    const requestedFile = queryFile;
     setBusy(button, true, '匹配中…');
+    input.disabled = true;
+    $('#results').hidden = true;
     $('#matchHint').textContent = '正在计算 OpenCLIP 图片向量相似度…';
     try {
-      renderResults(await api.searchSimilar(queryFile, 5));
+      renderResults(await api.searchSimilar(requestedFile, 5));
     } catch (error) {
       $('#results').hidden = true;
       $('#matchHint').textContent = error.message || '匹配失败，请稍后重试。';
     } finally {
+      input.disabled = false;
       setBusy(button, false, '匹配中…');
     }
   };
