@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Iterable
@@ -52,6 +53,15 @@ class SearchResult:
     dimension: int
     cosine_distance: float
     similarity_percent: float
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: Decimal | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 class LibraryService:

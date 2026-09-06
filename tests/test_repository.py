@@ -14,7 +14,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.config import Settings
-from backend.db import create_database_and_schema, create_session_factory, dispose_session_factory
+from backend.db import (
+    _upgrade_image_metadata_columns,
+    create_database_and_schema,
+    create_session_factory,
+    dispose_session_factory,
+)
 from backend.encoders.base import EncoderIdentity
 from backend.models import ImageEmbedding, ImageRecord
 from backend.repository import ImageMetadata, ImageRepository, cosine_distance_to_percent
@@ -117,6 +122,44 @@ def test_schema_initialization_is_idempotent_and_enables_vector(settings: Settin
     assert db_session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")).scalar_one()
 
 
+def test_old_schema_metadata_upgrade_is_repeatable_and_preserves_existing_image(
+    repository: ImageRepository, db_session: Session
+) -> None:
+    """旧表补齐元数据列可重复执行，且不影响已有图片记录。"""
+    image = add_test_image(repository, "legacy.jpg")
+    db_session.execute(text("ALTER TABLE images DROP CONSTRAINT IF EXISTS ck_images_price_nonnegative"))
+    for column in (
+        "sku",
+        "product_name",
+        "size",
+        "price",
+        "room",
+        "style",
+        "color",
+        "stock",
+        "selling_point",
+    ):
+        db_session.execute(text(f"ALTER TABLE images DROP COLUMN IF EXISTS {column}"))
+
+    connection = db_session.connection()
+    _upgrade_image_metadata_columns(connection)
+    _upgrade_image_metadata_columns(connection)
+    db_session.expire_all()
+
+    restored = repository.find_by_id(image.id)
+    assert restored is not None
+    assert restored.original_name == "legacy.jpg"
+    columns = db_session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'images' "
+            "AND column_name IN ('sku', 'product_name', 'size', 'price', 'room', 'style', 'color', 'stock', 'selling_point') "
+            "ORDER BY column_name"
+        )
+    ).scalars().all()
+    assert columns == ["color", "price", "product_name", "room", "selling_point", "size", "sku", "stock", "style"]
+
+
 def test_dispose_session_factory_disposes_its_bound_engine() -> None:
     """长期 CLI/API 进程可显式释放连接池，避免测试或短命令残留连接。"""
     engine = MagicMock()
@@ -164,7 +207,7 @@ def test_repository_persists_optional_metadata_and_blank_update_keeps_existing(r
     )
     repository.update_metadata(image, ImageMetadata(product_name=None, room="卧室"))
 
-    row = repository.list_library()[0]
+    row = next(row for row in repository.list_library() if row.image_id == image.id)
 
     assert row.product_name == "云朵地毯"
     assert row.price == Decimal("899.00")

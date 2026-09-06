@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -160,12 +161,30 @@ def test_search_excludes_exact_query_without_persisting_query(
     query_hash = validate_image(query).sha256
     repository.search_rows = [
         SearchRow(1, "exact.png", "data/images/exact.png", query_hash, "image/png", 8, 6, "fake", "test-model", "v1", 3, 0.0, 100.0),
-        SearchRow(2, "same-carpet-angle.jpg", "data/images/angle.jpg", "a" * 64, "image/jpeg", 8, 6, "fake", "test-model", "v1", 3, 0.1, 90.0),
+        SearchRow(
+            2,
+            "same-carpet-angle.jpg",
+            "data/images/angle.jpg",
+            "a" * 64,
+            "image/jpeg",
+            8,
+            6,
+            "fake",
+            "test-model",
+            "v1",
+            3,
+            0.1,
+            90.0,
+            product_name="云朵地毯",
+            price=Decimal("899.00"),
+        ),
     ]
 
     results = service.search(query, top_k=5)
 
     assert [item.original_name for item in results] == ["same-carpet-angle.jpg"]
+    assert results[0].product_name == "云朵地毯"
+    assert results[0].price == Decimal("899.00")
     assert repository.image_count() == 0
     assert not (tmp_path / "library").exists()
 
