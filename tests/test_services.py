@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,7 @@ import pytest
 
 from backend.encoders.base import EncoderIdentity, normalize_embedding
 from backend.image_assets import validate_image
-from backend.repository import SearchRow
+from backend.repository import ImageMetadata, SearchRow
 from backend.services import ImportStatus, LibraryService
 
 
@@ -20,6 +21,13 @@ def make_png(path: Path, color: str = "red") -> Path:
     """创建小型有效 PNG，避免服务单元测试依赖真实模型。"""
     Image.new("RGB", (8, 6), color).save(path)
     return path
+
+
+def png_bytes(color: str = "red") -> bytes:
+    """生成用于内存上传场景的真实 PNG 字节。"""
+    output = BytesIO()
+    Image.new("RGB", (8, 6), color).save(output, format="PNG")
+    return output.getvalue()
 
 
 class FakeEncoder:
@@ -41,6 +49,15 @@ class FakeImage:
 
     id: int
     sha256: str
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: Decimal | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 class FakeRepository:
@@ -57,6 +74,9 @@ class FakeRepository:
     def find_by_sha256(self, sha256: str) -> FakeImage | None:
         return self.images.get(sha256)
 
+    def find_by_id(self, image_id: int | None) -> FakeImage | None:
+        return next((image for image in self.images.values() if image.id == image_id), None)
+
     def has_embedding(self, image: FakeImage, identity: EncoderIdentity) -> bool:
         return (image.id, identity) in self.embeddings
 
@@ -65,6 +85,12 @@ class FakeRepository:
         self._next_id += 1
         self.images[image.sha256] = image
         return image
+
+    def update_metadata(self, image: FakeImage, metadata: ImageMetadata) -> None:
+        for field in ImageMetadata.__dataclass_fields__:
+            value = getattr(metadata, field)
+            if value is not None:
+                setattr(image, field, value)
 
     def upsert_embedding(self, image: FakeImage, identity: EncoderIdentity, _embedding: np.ndarray) -> None:
         self.embeddings.add((image.id, identity))
@@ -132,6 +158,48 @@ def test_import_reuses_image_and_adds_only_missing_current_model_embedding(
     assert added[0].status is ImportStatus.EMBEDDING_ADDED
     assert repository.image_count() == 1
     assert len(repository.embeddings) == 2
+
+
+def test_import_bytes_persists_metadata_and_duplicate_updates_nonblank_fields(
+    service: LibraryService, repository: FakeRepository
+) -> None:
+    """重复上传同一字节时应保留已有资料并补充新的非空字段。"""
+    data = png_bytes("red")
+
+    first = service.import_bytes(data, "buyer.png", ImageMetadata(product_name="云朵", sku="CT-1"))
+    second = service.import_bytes(data, "buyer.png", ImageMetadata(room="客厅"))
+
+    assert first.status is ImportStatus.IMPORTED
+    assert second.status is ImportStatus.DUPLICATE
+    assert first.image_id == second.image_id
+    image = repository.find_by_id(first.image_id)
+    assert image is not None
+    assert image.product_name == "云朵"
+    assert image.sku == "CT-1"
+    assert image.room == "客厅"
+
+
+def test_import_bytes_encoding_failure_rolls_back_and_removes_only_new_file(
+    service: LibraryService, repository: FakeRepository, tmp_path: Path
+) -> None:
+    """内存上传编码失败时仅清理本次新建文件，已有图库文件必须保留。"""
+    data = png_bytes("blue")
+    sentinel = tmp_path / "library" / "sentinel.png"
+    sentinel.parent.mkdir()
+    sentinel.write_bytes(b"keep")
+
+    class FailingEncoder(FakeEncoder):
+        def encode(self, _image: Image.Image) -> np.ndarray:
+            raise RuntimeError("编码失败")
+
+    service.encoder = FailingEncoder()
+    result = service.import_bytes(data, "buyer.png", ImageMetadata(product_name="云朵"))
+
+    assert result.status is ImportStatus.FAILED
+    assert result.image_id is None
+    assert not any(path.name != "sentinel.png" for path in (tmp_path / "library").iterdir())
+    assert sentinel.read_bytes() == b"keep"
+    assert repository.rollbacks == 1
 
 
 def test_import_failure_after_new_file_storage_removes_only_that_file(

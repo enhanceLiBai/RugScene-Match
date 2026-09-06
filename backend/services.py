@@ -12,9 +12,9 @@ import numpy as np
 from sqlalchemy import select
 
 from backend.encoders.base import EncoderIdentity, ImageEncoder
-from backend.image_assets import _SUPPORTED_EXTENSIONS, store_image, validate_image
+from backend.image_assets import ValidatedImage, _SUPPORTED_EXTENSIONS, store_image, validate_image, validate_image_bytes
 from backend.models import ImageEmbedding, ImageRecord
-from backend.repository import ImageRepository, SearchRow
+from backend.repository import ImageMetadata, ImageRepository, SearchRow
 
 
 class ImportStatus(str, Enum):
@@ -33,6 +33,7 @@ class ImportResult:
     path: Path
     status: ImportStatus
     message: str
+    image_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,12 @@ class LibraryService:
             raise ValueError(f"导入路径不是文件或目录：{source.name or source}")
         return [self._import_one(item) for item in self._iter_images(source)]
 
+    def import_bytes(self, data: bytes, original_name: str, metadata: ImageMetadata) -> ImportResult:
+        """导入已在内存中的图片字节，并将非空商品字段写入图库记录。"""
+        # 校验错误需要由上传接口识别，不能被入库失败结果吞掉。
+        validated = validate_image_bytes(data, original_name)
+        return self._import_validated(validated, Path(validated.original_name), metadata)
+
     def search(self, path: Path, top_k: int = 5) -> list[SearchResult]:
         """只在内存中校验和编码查询图，不创建文件或数据库记录。"""
         self._validate_top_k(top_k)
@@ -107,20 +114,31 @@ class LibraryService:
         return sorted(candidates, key=lambda item: str(item.resolve()).replace("\\", "/").casefold())
 
     def _import_one(self, source: Path) -> ImportResult:
-        """执行一张图片的完整工作单元，并在失败时回滚该图片的副作用。"""
+        """校验路径图片后交给共享工作单元，保留目录导入的逐图容错。"""
+        try:
+            validated = validate_image(source)
+        except Exception:
+            self._rollback()
+            return ImportResult(source, ImportStatus.FAILED, "导入失败，请检查图片内容、模型和数据库连接。")
+        return self._import_validated(validated, source, ImageMetadata())
+
+    def _import_validated(
+        self,
+        validated: ValidatedImage,
+        source_label: Path,
+        metadata: ImageMetadata,
+    ) -> ImportResult:
+        """持久化已验证图片、元数据和当前模型向量，并负责单图事务。"""
         stored_path: Path | None = None
         created_library_file = False
         try:
-            validated = validate_image(source)
             identity = self.encoder.identity
             image = self.repository.find_by_sha256(validated.sha256)
-            if image is not None and self._has_embedding(image, identity):
-                return ImportResult(source, ImportStatus.DUPLICATE, "图片与当前模型向量已存在。")
 
             if image is None:
                 target = self.image_dir / f"{validated.sha256}{validated.extension}"
                 existed_before = target.exists()
-                stored_path = store_image(source, validated, self.image_dir)
+                stored_path = store_image(source_label, validated, self.image_dir)
                 # 仅清理本次开始前不存在的目标；已有图库文件永远不受失败事务影响。
                 created_library_file = not existed_before
                 image = self.repository.add_image(
@@ -137,16 +155,21 @@ class LibraryService:
                 status = ImportStatus.EMBEDDING_ADDED
                 success_message = "已有图片已补充当前模型向量。"
 
+            self.repository.update_metadata(image, metadata)
+            if self._has_embedding(image, identity):
+                self._commit()
+                return ImportResult(source_label, ImportStatus.DUPLICATE, "图片与当前模型向量已存在。", image.id)
+
             embedding = self.encoder.encode(validated.image)
             self.repository.upsert_embedding(image, identity, embedding)
             self._commit()
-            return ImportResult(source, status, success_message)
+            return ImportResult(source_label, status, success_message, image.id)
         except Exception:
             self._rollback()
             if created_library_file and stored_path is not None:
                 stored_path.unlink(missing_ok=True)
             # 导入记录不能携带数据库 URI、密码或模型下载的内部细节。
-            return ImportResult(source, ImportStatus.FAILED, "导入失败，请检查图片内容、模型和数据库连接。")
+            return ImportResult(source_label, ImportStatus.FAILED, "导入失败，请检查图片内容、模型和数据库连接。")
 
     def _has_embedding(self, image: object, identity: EncoderIdentity) -> bool:
         """兼容最小仓库接口，同时在现有仓库中精确匹配完整模型身份。"""
