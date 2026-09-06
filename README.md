@@ -48,6 +48,8 @@ Copy-Item .env.example .env
 
 ### 验证命令
 
+日常修改只运行直接相关的测试；合并或发布前再执行一次完整的非模型回归和依赖检查。没有代码变化时不要重复运行同一套测试。真实 OpenCLIP 冒烟测试仅在编码器相关代码发生变化、需要验收真实模型，或用户明确要求时运行。
+
 ```powershell
 .venv\Scripts\python.exe -m pytest tests -m "not model" -q
 .venv\Scripts\python.exe -m pip check

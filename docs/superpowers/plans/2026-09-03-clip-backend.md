@@ -1,6 +1,9 @@
 # CLIP 图片建库与检索后端 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> 状态：已完成，作为历史实施记录保留。
+> 执行说明：下方复选框保留原始计划形态，不表示当前待办。除非用户明确重新启用本计划，否则不得据此重复实现、补测、运行全量验证或发起新一轮审查。
+
+> 历史执行方式：实施阶段曾按任务使用 subagent-driven-development / executing-plans；该要求现已结束。下方 checkbox 仅保留当时的计划格式。
 
 **Goal:** 在本地项目目录中建立可替换图片编码器的 Python 后端，将图片及 CLIP 向量写入 PostgreSQL/pgvector，并通过 CLI 与 FastAPI 提供 Top K 相似度检索。
 
@@ -22,7 +25,7 @@
 - 模型不得写死在建库或检索业务中，必须通过 `ImageEncoder` 抽象和环境变量选择。
 - 技术验证阶段不创建 HNSW 或 IVFFlat 索引。
 - `.env`、`.venv/`、`.cache/`、`data/images/` 不进入版本控制。
-- 当前目录不是 Git 仓库，计划中的每个检查点运行测试并记录结果，不执行 commit。
+- 历史背景：编写本计划时目录尚未按最终 Git 工作流管理；当前仓库和分支状态以实际 `git status` 为准。
 
 ## File Structure
 
@@ -623,4 +626,3 @@ Run: `.venv\Scripts\python.exe -m pip check`
 Run: `.venv\Scripts\python.exe -m backend.cli --help`
 
 Expected: 测试零失败、依赖无冲突、CLI 四个子命令完整。检查 `.venv/`、`.cache/`、`.env` 和 `data/images/` 均被 `.gitignore` 覆盖，源码中不存在真实密码。
-

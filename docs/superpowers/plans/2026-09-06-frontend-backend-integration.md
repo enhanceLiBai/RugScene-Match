@@ -1,6 +1,9 @@
 # 前后端图库与图片检索集成 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> 状态：已在 `codex/frontend-backend-integration` 分支实施完成，当前等待合并。
+> 执行说明：下方复选框仅保留原始计划，不表示当前待办。除非用户明确要求重新实施，否则不得据此重复编码、补测、运行全量验证或继续寻找边缘缺陷。
+
+> 历史执行方式：实施阶段曾按任务使用 subagent-driven-development / executing-plans；该要求现已结束。下方 checkbox 仅保留当时的计划格式。
 
 **Goal:** 让客服通过 FastAPI 同源页面把买家秀及选填元数据写入后端、查看数据库图库，并上传客户图片执行 OpenCLIP/pgvector 相似检索。
 
