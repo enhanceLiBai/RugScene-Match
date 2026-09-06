@@ -33,10 +33,14 @@ def test_open_clip_encodes_a_real_image_with_project_local_cache(monkeypatch: py
     for name in settings.cache_environment():
         monkeypatch.delenv(name, raising=False)
 
+    managed_cache_environment_before_encode = {name: os.environ.get(name) for name in settings.cache_environment()}
+    model_cache_dir = settings.project_root / ".cache" / "open_clip"
     vector = OpenClipEncoder(settings).encode(Image.new("RGB", (4, 4), "red"))
 
     assert vector.dtype == np.float32
     assert vector.size > 0
     assert np.isfinite(vector).all()
     assert np.linalg.norm(vector) == pytest.approx(1.0, abs=1e-5)
-    assert {name: os.environ[name] for name in settings.cache_environment()} == settings.cache_environment()
+    assert model_cache_dir.is_relative_to(settings.project_root / ".cache")
+    assert any(item.is_file() and item.stat().st_size > 10 * 1024 * 1024 for item in model_cache_dir.rglob("*"))
+    assert {name: os.environ.get(name) for name in settings.cache_environment()} == managed_cache_environment_before_encode
