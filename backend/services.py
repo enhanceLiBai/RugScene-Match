@@ -137,8 +137,10 @@ class LibraryService:
         """持久化已验证图片、元数据和当前模型向量，并负责单图事务。"""
         stored_path: Path | None = None
         created_library_file = False
+        commit_attempted = False
         try:
             identity = self.encoder.identity
+            self._lock_sha256(validated.sha256)
             image = self.repository.find_by_sha256(validated.sha256)
 
             if image is None:
@@ -162,16 +164,18 @@ class LibraryService:
 
             self.repository.update_metadata(image, metadata)
             if self._has_embedding(image, identity):
+                commit_attempted = True
                 self._commit()
                 return ImportResult(source_label, ImportStatus.DUPLICATE, "图片与当前模型向量已存在。", image.id)
 
             embedding = self.encoder.encode(validated.image)
             self.repository.upsert_embedding(image, identity, embedding)
+            commit_attempted = True
             self._commit()
             return ImportResult(source_label, status, success_message, image.id)
         except Exception:
             self._rollback()
-            if created_library_file and stored_path is not None:
+            if not commit_attempted and created_library_file and stored_path is not None:
                 stored_path.unlink(missing_ok=True)
             # 导入记录不能携带数据库 URI、密码或模型下载的内部细节。
             return ImportResult(source_label, ImportStatus.FAILED, "导入失败，请检查图片内容、模型和数据库连接。")
@@ -200,6 +204,12 @@ class LibraryService:
             committer()
             return
         self.repository._session.commit()
+
+    def _lock_sha256(self, sha256: str) -> None:
+        """真实仓库使用事务级咨询锁；未提供该能力的测试替身保持无操作。"""
+        locker = getattr(self.repository, "lock_sha256", None)
+        if locker is not None:
+            locker(sha256)
 
     def _rollback(self) -> None:
         """仅回滚当前图片，确保目录导入能继续处理后续候选。"""

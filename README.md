@@ -11,7 +11,7 @@ scripts\bootstrap.ps1
 Copy-Item .env.example .env
 ```
 
-仅在本机 `.env` 中填写 PostgreSQL 配置，不要提交该文件，也不要在日志或截图中记录密码或完整数据库 URL。`scripts\bootstrap.ps1` 只创建项目内 `.venv`；依赖和模型缓存保留在项目 `.cache` 中。
+仅在本机 `.env` 中填写 PostgreSQL 配置，不要提交该文件，也不要在日志或截图中记录密码或完整数据库 URL。`scripts\bootstrap.ps1` 会创建或复用项目内 `.venv`、升级 pip，并安装 `requirements.in` 中的依赖；依赖和模型缓存保留在项目 `.cache` 中。
 
 ## 正式启动方式
 
@@ -51,8 +51,10 @@ node --check api-client.js
 node --check matcher-core.js
 node --check app.js
 $env:PYTHONIOENCODING='utf-8'; .venv\Scripts\python.exe -m pip check
-node --test tests\api-client.test.js tests\matcher-core.test.js
+node --test tests\api-client.test.js tests\matcher-core.test.js tests\app.test.js
 $env:PYTHONIOENCODING='utf-8'; .venv\Scripts\python.exe -m pytest tests -m "not model" -q
 ```
+
+以上三份 Node 内置测试当前共 15 项（原有完整集为 12 项；本轮增加 3 项前端回归）。
 
 真实模型烟测需要可用的已缓存权重或网络访问；日常自动化测试默认使用 fake encoder，因此不触发模型下载。

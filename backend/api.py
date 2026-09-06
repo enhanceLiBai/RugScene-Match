@@ -25,6 +25,7 @@ from backend.services import ImportStatus, LibraryService
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_LIBRARY_PRICE = Decimal("9999999999.99")
 
 
 class ModelResponse(BaseModel):
@@ -136,7 +137,12 @@ def _optional_price(value: str | None) -> Decimal | None:
         price = Decimal(cleaned)
     except InvalidOperation as error:
         raise ValueError("参考价必须是非负且最多两位小数的数字。") from error
-    if not price.is_finite() or price < 0 or price.as_tuple().exponent < -2:
+    if (
+        not price.is_finite()
+        or price < 0
+        or price > MAX_LIBRARY_PRICE
+        or price.as_tuple().exponent < -2
+    ):
         raise ValueError("参考价必须是非负且最多两位小数的数字。")
     return price
 

@@ -9,7 +9,7 @@ import re
 from typing import Final
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -132,6 +132,15 @@ class ImageRepository:
     def find_by_sha256(self, sha256: str) -> ImageRecord | None:
         """按精确文件哈希查找已入库图片。"""
         return self._session.scalar(select(ImageRecord).where(ImageRecord.sha256 == sha256))
+
+    def lock_sha256(self, sha256: str) -> None:
+        """在当前 PostgreSQL 事务内串行化同一原始文件哈希的完整入库工作单元。"""
+        if not _SHA256_PATTERN.fullmatch(sha256):
+            raise ValueError("图片 SHA-256 必须是 64 位小写十六进制文本。")
+        key = int(sha256[:16], 16)
+        if key >= 1 << 63:
+            key -= 1 << 64
+        self._session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
     def add_image(
         self,

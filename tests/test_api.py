@@ -393,6 +393,18 @@ def test_library_upload_rejects_invalid_input_without_internal_details(
     assert "InvalidImageError" not in response.text
 
 
+def test_library_upload_rejects_price_above_database_precision(client: TestClient) -> None:
+    """超过 NUMERIC(12,2) 上限的价格必须在 API 边界返回 400。"""
+    response = client.post(
+        "/api/library",
+        files={"image": ("buyer.png", png_bytes(), "image/png")},
+        data={"price": "10000000000.00"},
+    )
+
+    assert response.status_code == 400
+    assert "服务暂不可用" not in response.text
+
+
 def test_root_serves_frontend_and_only_registered_assets(client: TestClient) -> None:
     """若挂载整个目录，未注册配置文件可能被同源静态路由暴露。"""
     assert client.get("/").status_code == 200

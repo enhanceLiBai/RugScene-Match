@@ -6,15 +6,21 @@ from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+import threading
+import uuid
 
 import numpy as np
 from PIL import Image
 import pytest
+from sqlalchemy.orm import Session
 
+import backend.services as services_module
+from backend.config import Settings
+from backend.db import create_database_and_schema, create_session_factory, dispose_session_factory
 from backend.encoders.base import EncoderIdentity, normalize_embedding
-from backend.image_assets import validate_image, validate_image_bytes
-from backend.repository import ImageMetadata, SearchRow
-from backend.services import ImportStatus, LibraryService
+from backend.image_assets import StoredImage, ValidatedImage, validate_image, validate_image_bytes
+from backend.repository import ImageMetadata, ImageRepository, SearchRow
+from backend.services import ImportResult, ImportStatus, LibraryService
 
 
 def make_png(path: Path, color: str = "red") -> Path:
@@ -226,6 +232,139 @@ def test_import_bytes_race_failure_keeps_file_created_by_other_request(
     assert result.status is ImportStatus.FAILED
     assert target.read_bytes() == b"concurrent-library-content"
     assert repository.rollbacks == 1
+
+
+def test_same_sha_two_sessions_keep_file_when_failed_import_precedes_successful_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同哈希的失败事务不能删除另一会话随后成功提交所依赖的图库文件。"""
+    settings = Settings.load()
+    create_database_and_schema(settings)
+    session_factory = create_session_factory(settings)
+    data = png_bytes(f"#{uuid.uuid4().hex[:6]}")
+    validated = validate_image_bytes(data, "first.png")
+    image_dir = tmp_path / "data" / "images"
+    start = threading.Barrier(2)
+    lock_handoff = threading.Barrier(2)
+    first_lock_acquired = threading.Event()
+    second_lock_attempted = threading.Event()
+    advisory_lock_used = threading.Event()
+    first_file_stored = threading.Event()
+    second_file_stored = threading.Event()
+    results: dict[str, ImportResult] = {}
+    errors: list[BaseException] = []
+
+    class CoordinatedRepository(ImageRepository):
+        """真实仓库加少量测试协调点，确保两个事务竞争同一个哈希。"""
+
+        def __init__(self, session: Session, worker: str) -> None:
+            super().__init__(session)
+            self.worker = worker
+
+        def lock_sha256(self, sha256: str) -> None:
+            advisory_lock_used.set()
+            if self.worker == "first":
+                super().lock_sha256(sha256)
+                first_lock_acquired.set()
+                lock_handoff.wait(timeout=10)
+                assert second_lock_attempted.wait(timeout=10)
+                return
+            assert first_lock_acquired.wait(timeout=10)
+            lock_handoff.wait(timeout=10)
+            second_lock_attempted.set()
+            super().lock_sha256(sha256)
+
+    original_store = services_module.store_image_with_ownership
+
+    def coordinated_store(source: Path, image: ValidatedImage, destination: Path) -> StoredImage:
+        if source.name == "second.png":
+            assert first_file_stored.wait(timeout=10)
+            stored = original_store(source, image, destination)
+            second_file_stored.set()
+            return stored
+        stored = original_store(source, image, destination)
+        first_file_stored.set()
+        return stored
+
+    class FirstEncoder(FakeEncoder):
+        def encode(self, _image: Image.Image) -> np.ndarray:
+            if not advisory_lock_used.is_set():
+                assert second_file_stored.wait(timeout=10)
+            raise RuntimeError("first import fails after storing the shared file")
+
+    def run(worker: str) -> None:
+        session = session_factory()
+        try:
+            repository = CoordinatedRepository(session, worker)
+            service = LibraryService(
+                repository=repository,
+                encoder=FirstEncoder() if worker == "first" else FakeEncoder(),
+                image_dir=image_dir,
+                project_root=tmp_path,
+            )
+            start.wait(timeout=10)
+            name = "first.png" if worker == "first" else "second.png"
+            results[worker] = service.import_bytes(data, name, ImageMetadata())
+        except BaseException as error:  # 线程中的断言需回传给主测试线程。
+            errors.append(error)
+        finally:
+            session.close()
+
+    first = threading.Thread(target=run, args=("first",), daemon=True)
+    second = threading.Thread(target=run, args=("second",), daemon=True)
+    try:
+        monkeypatch.setattr(services_module, "store_image_with_ownership", coordinated_store)
+        first.start()
+        second.start()
+        first.join(timeout=15)
+        second.join(timeout=15)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert not errors
+        assert results["first"].status is ImportStatus.FAILED
+        assert results["second"].status is ImportStatus.IMPORTED
+        assert (image_dir / f"{validated.sha256}.png").is_file()
+    finally:
+        first.join(timeout=1)
+        second.join(timeout=1)
+        cleanup = session_factory()
+        try:
+            record = ImageRepository(cleanup).find_by_sha256(validated.sha256)
+            if record is not None:
+                cleanup.delete(record)
+                cleanup.commit()
+        finally:
+            cleanup.close()
+            dispose_session_factory(session_factory)
+
+
+def test_import_keeps_new_file_when_commit_acknowledgement_is_lost(
+    tmp_path: Path,
+) -> None:
+    """提交已尝试后的确认异常不能触发可能删除已提交文件的补偿。"""
+
+    class CommitAcknowledgementLossRepository(FakeRepository):
+        def commit(self) -> None:
+            super().commit()
+            raise ConnectionError("commit acknowledgement lost")
+
+    uncertain_repository = CommitAcknowledgementLossRepository()
+    uncertain_service = LibraryService(
+        repository=uncertain_repository,
+        encoder=FakeEncoder(),
+        image_dir=tmp_path / "library",
+        project_root=tmp_path,
+    )
+    data = png_bytes("purple")
+    validated = validate_image_bytes(data, "buyer.png")
+
+    result = uncertain_service.import_bytes(data, "buyer.png", ImageMetadata())
+
+    assert result.status is ImportStatus.FAILED
+    assert (tmp_path / "library" / f"{validated.sha256}.png").is_file()
+    assert uncertain_repository.commits == 1
+    assert uncertain_repository.rollbacks == 1
 
 
 def test_import_failure_after_new_file_storage_removes_only_that_file(

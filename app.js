@@ -1,5 +1,8 @@
 const api = CarpetApiClient.create();
 let queryFile;
+let latestLibraryRequest = 0;
+let hasLoadedLibrary = false;
+const previewUrls = new WeakMap();
 const $ = (selector) => document.querySelector(selector);
 
 function statusClass(kind) {
@@ -14,17 +17,22 @@ function setStatus(element, message, kind) {
 
 /** 从后端刷新图库；失败时保留可见重试入口。 */
 async function refreshLibrary() {
+  const requestId = ++latestLibraryRequest;
   const button = $('#reloadLibraryButton');
   setBusy(button, true, '刷新中…');
   setStatus($('#libraryStatus'), '正在读取图库…');
   try {
     const payload = await api.listLibrary();
+    if (requestId !== latestLibraryRequest) return;
     renderLibrary(payload.images || []);
+    hasLoadedLibrary = true;
     setStatus($('#libraryStatus'), '');
   } catch (error) {
+    if (requestId !== latestLibraryRequest) return;
+    if (!hasLoadedLibrary) $('#libraryCount').textContent = '—';
     setStatus($('#libraryStatus'), error.message || '图库加载失败，请稍后重试。', 'error');
   } finally {
-    setBusy(button, false, '刷新中…');
+    if (requestId === latestLibraryRequest) setBusy(button, false, '刷新中…');
   }
 }
 
@@ -137,12 +145,40 @@ function showEntryStatus(message, kind) {
   setStatus($('#entryStatus'), message, kind);
 }
 
+function revokePreview(image) {
+  const url = previewUrls.get(image);
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  previewUrls.delete(image);
+}
+
+function clearPreview(image, copy) {
+  revokePreview(image);
+  image.hidden = true;
+  if (copy) copy.hidden = false;
+}
+
 function preview(input, image, copy) {
   const file = input.files[0];
   if (!file) return;
-  image.src = URL.createObjectURL(file);
+  revokePreview(image);
+  const url = URL.createObjectURL(file);
+  previewUrls.set(image, url);
+  image.src = url;
   image.hidden = false;
   if (copy) copy.hidden = true;
+}
+
+function setEntryFormBusy(form, busy) {
+  Array.from(form.elements).forEach((control) => {
+    if (busy) {
+      control.dataset.entryWasDisabled = String(control.disabled);
+      control.disabled = true;
+      return;
+    }
+    control.disabled = control.dataset.entryWasDisabled === 'true';
+    delete control.dataset.entryWasDisabled;
+  });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -162,6 +198,10 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   $('#entryImage').onchange = (event) => preview(event.target, $('#entryPreview'), $('#entryImageText'));
   $('#reloadLibraryButton').onclick = refreshLibrary;
+  window.addEventListener('beforeunload', () => {
+    revokePreview($('#queryPreview'));
+    revokePreview($('#entryPreview'));
+  });
 
   $('#matchButton').onclick = async () => {
     if (!queryFile) {
@@ -196,19 +236,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const button = $('#entrySubmitButton');
+    const form = event.target;
+    setEntryFormBusy(form, true);
     setBusy(button, true, '保存中…');
     showEntryStatus('正在上传图片并生成向量…');
     try {
       const response = await api.uploadLibraryImage(file, readEntryMetadata());
-      event.target.reset();
-      $('#entryPreview').hidden = true;
-      $('#entryImageText').hidden = false;
+      form.reset();
+      clearPreview($('#entryPreview'), $('#entryImageText'));
       showEntryStatus(response.status === 'duplicate' ? '图库已有这张图片，商品信息已补充。' : '图片已保存并加入图库。');
       await refreshLibrary();
     } catch (error) {
       showEntryStatus(error.message || '图片入库失败，请稍后重试。', 'error');
     } finally {
       setBusy(button, false, '保存中…');
+      setEntryFormBusy(form, false);
     }
   };
 });
