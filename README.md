@@ -13,6 +13,8 @@ Copy-Item .env.example .env
 
 仅在本机 `.env` 中填写 PostgreSQL 配置，不要提交该文件，也不要在日志或截图中记录密码或完整数据库 URL。`scripts\bootstrap.ps1` 会创建或复用项目内 `.venv`、升级 pip，并安装 `requirements.in` 中的依赖；依赖和模型缓存保留在项目 `.cache` 中。
 
+如果 OpenCLIP 权重已经保存在其他项目或共享目录，可在 `.env` 中设置 `CLIP_CACHE_DIR` 指向现有的 OpenCLIP 缓存目录，避免重复下载。相对路径按当前项目根目录解析；未配置时仍使用 `.cache\open_clip`。
+
 ## 正式启动方式
 
 在项目根目录依次执行：

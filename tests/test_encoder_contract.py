@@ -259,6 +259,25 @@ def test_open_clip_selects_configured_device(
     assert open_clip.create_calls == [("ViT-B-32", "openai", expected, str(tmp_path / ".cache" / "open_clip"))]
 
 
+def test_open_clip_uses_explicit_shared_cache_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """worktree 应能复用已下载的共享权重，避免再次联网下载。"""
+    import backend.encoders.open_clip as open_clip_module
+
+    shared_cache = tmp_path / "shared-open-clip"
+    settings = make_settings(tmp_path, monkeypatch, clip_cache_dir=shared_cache)
+    open_clip = FakeOpenClipRuntime()
+    torch = FakeTorchRuntime(cuda_available=False)
+    monkeypatch.setattr(
+        open_clip_module.importlib,
+        "import_module",
+        lambda name: {"torch": torch, "open_clip": open_clip}[name],
+    )
+
+    OpenClipEncoder(settings).identity
+
+    assert open_clip.create_calls == [("ViT-B-32", "openai", "cpu", str(shared_cache))]
+
+
 def test_factory_construction_does_not_change_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """工厂和构造不得泄漏缓存配置到长驻工作进程的全局环境。"""
     settings = make_settings(tmp_path, monkeypatch)

@@ -29,12 +29,13 @@ def test_open_clip_encodes_a_real_image_with_project_local_cache(monkeypatch: py
         clip_model_name="ViT-B-32",
         clip_pretrained="openai",
         model_device="auto",
+        clip_cache_dir=project_root / ".cache" / "open_clip",
     )
     for name in settings.cache_environment():
         monkeypatch.delenv(name, raising=False)
 
     managed_cache_environment_before_encode = {name: os.environ.get(name) for name in settings.cache_environment()}
-    model_cache_dir = settings.project_root / ".cache" / "open_clip"
+    model_cache_dir = settings.clip_cache_dir
     vector = OpenClipEncoder(settings).encode(Image.new("RGB", (4, 4), "red"))
 
     assert vector.dtype == np.float32

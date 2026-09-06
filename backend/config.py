@@ -22,6 +22,7 @@ class Settings:
     clip_model_name: str
     clip_pretrained: str
     model_device: str
+    clip_cache_dir: Path
 
     @property
     def venv_dir(self) -> Path:
@@ -47,6 +48,11 @@ class Settings:
         if not password:
             raise ValueError("缺少 POSTGRES_PASSWORD，请在环境变量或项目 .env 中配置数据库密码。")
 
+        configured_clip_cache = setting("CLIP_CACHE_DIR")
+        clip_cache_dir = Path(configured_clip_cache).expanduser() if configured_clip_cache else root / ".cache" / "open_clip"
+        if not clip_cache_dir.is_absolute():
+            clip_cache_dir = root / clip_cache_dir
+
         return cls(
             project_root=root,
             postgres_host=setting("POSTGRES_HOST", "127.0.0.1") or "127.0.0.1",
@@ -58,6 +64,7 @@ class Settings:
             clip_model_name=setting("CLIP_MODEL_NAME", "ViT-B-32") or "ViT-B-32",
             clip_pretrained=setting("CLIP_PRETRAINED", "openai") or "openai",
             model_device=setting("MODEL_DEVICE", "auto") or "auto",
+            clip_cache_dir=clip_cache_dir.resolve(),
         )
 
     def cache_environment(self) -> dict[str, str]:
