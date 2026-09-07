@@ -8,12 +8,12 @@ import re
 from typing import Final
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from backend.encoders.base import EncoderIdentity
-from backend.models import ImageEmbedding, ImageRecord
+from backend.models import ImageEmbedding, ImageRecord, ImportJob, ProductImage
 
 
 @dataclass(frozen=True)
@@ -131,6 +131,86 @@ class ImageRepository:
     def find_by_id(self, image_id: int) -> ImageRecord | None:
         """按主键查找图片元数据，供受控图库文件读取使用。"""
         return self._session.get(ImageRecord, image_id)
+
+    def link_product_image(
+        self,
+        product_id: str,
+        image: ImageRecord,
+        image_role: str,
+        source_column: str,
+    ) -> ProductImage:
+        """幂等关联商品与图片，重复导入复用已有关联记录。"""
+        statement = insert(ProductImage).values(
+            product_id=product_id,
+            image_id=image.id,
+            image_role=image_role,
+            source_column=source_column,
+        )
+        statement = statement.on_conflict_do_nothing(
+            index_elements=(ProductImage.product_id, ProductImage.image_id, ProductImage.image_role)
+        )
+        self._session.execute(statement)
+        self._session.flush()
+        link = self._session.scalar(
+            select(ProductImage).where(
+                ProductImage.product_id == product_id,
+                ProductImage.image_id == image.id,
+                ProductImage.image_role == image_role,
+            )
+        )
+        if link is None:
+            raise RuntimeError("商品图片关联写入后未找到记录。")
+        return link
+
+    def set_current_product_main(
+        self,
+        product_id: str,
+        image: ImageRecord,
+        source_column: str = "K",
+    ) -> ProductImage:
+        """将指定图片设为当前主图，同时停用该商品此前所有主图。"""
+        link = self.link_product_image(product_id, image, "product_main", source_column)
+        self._session.execute(
+            update(ProductImage)
+            .where(
+                ProductImage.product_id == product_id,
+                ProductImage.image_role == "product_main",
+            )
+            .values(is_active=False)
+        )
+        self._session.execute(update(ProductImage).where(ProductImage.id == link.id).values(is_active=True))
+        self._session.flush()
+        return link
+
+    def list_product_images(self, product_id: str) -> list[ProductImage]:
+        """按关联创建顺序读取一个商品的全部主图和买家秀。"""
+        statement = select(ProductImage).where(ProductImage.product_id == product_id).order_by(ProductImage.id.asc())
+        return list(self._session.scalars(statement))
+
+    def create_import_job(self, job_id: str, original_name: str) -> ImportJob:
+        """新建处于上传状态的 Excel 导入任务。"""
+        job = ImportJob(job_id=job_id, original_name=original_name)
+        self._session.add(job)
+        self._session.flush()
+        return job
+
+    def find_import_job(self, job_id: str) -> ImportJob | None:
+        """按任务标识读取导入状态，供轮询接口使用。"""
+        return self._session.get(ImportJob, job_id)
+
+    def update_import_job(self, job_id: str, **values: object) -> ImportJob:
+        """更新导入任务的受控状态字段，拒绝改写任务身份和原始文件名。"""
+        allowed_fields = {"status", "processed", "total", "summary_json", "error_message"}
+        invalid_fields = set(values) - allowed_fields
+        if invalid_fields:
+            raise ValueError("导入任务包含不允许更新的字段。")
+        job = self.find_import_job(job_id)
+        if job is None:
+            raise ValueError("导入任务不存在。")
+        for field, value in values.items():
+            setattr(job, field, value)
+        self._session.flush()
+        return job
 
     def list_library(self) -> list[LibraryRow]:
         """稳定列出图片及全部已有模型身份，避免 API 逐图查询向量。"""

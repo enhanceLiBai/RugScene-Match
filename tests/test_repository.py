@@ -302,6 +302,78 @@ def test_embedding_count_uses_database_count_query() -> None:
     session.scalars.assert_not_called()
 
 
+def test_product_image_links_share_product_and_ignore_duplicate_association(repository: ImageRepository) -> None:
+    """重复导入同一单元格图片不能重复关联，且四张图片归属同一商品。"""
+    product_id = "SKU-1001"
+    main_image = add_test_image(repository, "main.jpg")
+    sofa_images = [add_test_image(repository, f"sofa-{index}.jpg") for index in range(1, 4)]
+
+    main_link = repository.link_product_image(product_id, main_image, "product_main", "K")
+    sofa_links = [
+        repository.link_product_image(product_id, image, "buyer_sofa", column)
+        for image, column in zip(sofa_images, ("L", "M", "N"), strict=True)
+    ]
+    duplicate_link = repository.link_product_image(product_id, sofa_images[0], "buyer_sofa", "L")
+
+    links = repository.list_product_images(product_id)
+
+    assert duplicate_link.id == sofa_links[0].id
+    assert [(link.product_id, link.image_id, link.image_role, link.source_column) for link in links] == [
+        (product_id, main_image.id, "product_main", "K"),
+        (product_id, sofa_images[0].id, "buyer_sofa", "L"),
+        (product_id, sofa_images[1].id, "buyer_sofa", "M"),
+        (product_id, sofa_images[2].id, "buyer_sofa", "N"),
+    ]
+    assert main_link.is_active is True
+
+
+def test_set_current_product_main_disables_previous_main(repository: ImageRepository) -> None:
+    """导入新主图时，旧主图必须保留关联但不再参与当前商品展示。"""
+    product_id = "SKU-1002"
+    old_main = add_test_image(repository, "old-main.jpg")
+    new_main = add_test_image(repository, "new-main.jpg")
+
+    old_link = repository.set_current_product_main(product_id, old_main)
+    new_link = repository.set_current_product_main(product_id, new_main)
+    links = repository.list_product_images(product_id)
+
+    assert old_link.is_active is False
+    assert new_link.is_active is True
+    assert [(link.image_id, link.is_active) for link in links if link.image_role == "product_main"] == [
+        (old_main.id, False),
+        (new_main.id, True),
+    ]
+
+
+def test_import_job_can_be_created_updated_and_found(repository: ImageRepository) -> None:
+    """导入进度和汇总结果必须在同一任务记录中持续可读。"""
+    job_id = uuid.uuid4().hex
+
+    created = repository.create_import_job(job_id, "catalog.xlsx")
+    updated = repository.update_import_job(
+        job_id,
+        status="completed",
+        processed=4,
+        total=4,
+        summary_json='{"linked": 4}',
+        error_message=None,
+    )
+    found = repository.find_import_job(job_id)
+
+    assert created.status == "uploading"
+    assert created.processed == 0
+    assert created.total == 0
+    assert updated.status == "completed"
+    assert (updated.processed, updated.total, updated.summary_json, updated.error_message) == (
+        4,
+        4,
+        '{"linked": 4}',
+        None,
+    )
+    assert found is not None
+    assert found.job_id == job_id
+
+
 def test_cosine_distance_percentage_clamps_rounds_and_rejects_non_finite_values() -> None:
     """对 pgvector 返回值统一裁剪，避免边界浮点误差传递给 API。"""
     assert cosine_distance_to_percent(-0.1) == 100.0

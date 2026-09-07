@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from pgvector.sqlalchemy import VECTOR
-from sqlalchemy import BigInteger, CHAR, CheckConstraint, DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -36,6 +36,11 @@ class ImageRecord(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    product_images: Mapped[list["ProductImage"]] = relationship(
+        back_populates="image",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class ImageEmbedding(Base):
@@ -60,3 +65,44 @@ class ImageEmbedding(Base):
     embedding: Mapped[object] = mapped_column(VECTOR(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     image: Mapped[ImageRecord] = relationship(back_populates="embeddings")
+
+
+class ProductImage(Base):
+    """关联商品与原始图片，保留主图历史并标记当前启用主图。"""
+
+    __tablename__ = "product_images"
+    __table_args__ = (
+        UniqueConstraint("product_id", "image_id", "image_role", name="uq_product_image_role"),
+        CheckConstraint("image_role IN ('product_main', 'buyer_sofa')", name="ck_product_images_role"),
+        CheckConstraint("source_column IN ('K', 'L', 'M', 'N')", name="ck_product_images_source_column"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    product_id: Mapped[str] = mapped_column(Text, nullable=False)
+    image_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("images.id", ondelete="CASCADE"), nullable=False)
+    image_role: Mapped[str] = mapped_column(Text, nullable=False)
+    source_column: Mapped[str] = mapped_column(CHAR(1), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    image: Mapped[ImageRecord] = relationship(back_populates="product_images")
+
+
+class ImportJob(Base):
+    """保存 Excel 导入的进度、结果汇总与错误信息。"""
+
+    __tablename__ = "import_jobs"
+
+    job_id: Mapped[str] = mapped_column(CHAR(32), primary_key=True)
+    original_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="uploading")
+    processed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    summary_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
