@@ -125,6 +125,32 @@ def test_iter_product_images_reads_supported_product_id_cell_types(
     assert [image.product_id for image in images] == [expected_product_id] * 4
 
 
+def test_iter_product_images_streams_worksheet_and_shared_strings_xml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """大 worksheet/sharedStrings 解析不能把整个 ZIP 条目交给 archive.read。"""
+    workbook = tmp_path / "streamed-xml.xlsx"
+    write_tencent_workbook(
+        workbook,
+        product_cell='<c r="F2" t="s"><v>0</v></c>',
+        include_shared_strings=True,
+    )
+    read_paths: list[str] = []
+    original_read = ZipFile.read
+
+    def record_read(archive: ZipFile, name: str, *args: object, **kwargs: object) -> bytes:
+        read_paths.append(name)
+        return original_read(archive, name, *args, **kwargs)
+
+    monkeypatch.setattr(ZipFile, "read", record_read)
+
+    images = list(iter_product_images(workbook))
+
+    assert [image.product_id for image in images] == ["SKU-共享"] * 4
+    assert "xl/worksheets/sheet1.xml" not in read_paths
+    assert "xl/sharedStrings.xml" not in read_paths
+
+
 def test_iter_product_images_rejects_workbook_without_carpet_sheet(tmp_path: Path) -> None:
     """目标工作表被改名时必须给出稳定的结构错误。"""
     workbook = tmp_path / "wrong-sheet.xlsx"
