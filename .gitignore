@@ -2,6 +2,7 @@
 .cache/
 .env
 data/images/
+data/import_jobs/
 __pycache__/
 .pytest_cache/
 *.py[cod]

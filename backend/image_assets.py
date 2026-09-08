@@ -113,6 +113,12 @@ def validate_image_bytes(data: bytes, original_name: str) -> ValidatedImage:
     )
 
 
+def store_image_bytes(data: bytes, original_name: str, image_dir: Path) -> tuple[ValidatedImage, Path]:
+    """校验原始图片字节并复用哈希路径安全落盘，不转换存储格式。"""
+    validated = validate_image_bytes(data, original_name)
+    return validated, store_image(Path(validated.original_name), validated, image_dir)
+
+
 def store_image(source: Path, validated: ValidatedImage, image_dir: Path) -> Path:
     """将已验证字节原子写入哈希路径，既有文件永不覆盖。"""
     del source  # 落盘只使用校验时保留的字节，防止源文件被替换后出现 TOCTOU 不一致。

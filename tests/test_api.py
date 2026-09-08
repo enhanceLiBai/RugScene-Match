@@ -6,6 +6,8 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 import uuid
+import json
+from zipfile import ZipFile
 
 import numpy as np
 import pytest
@@ -250,3 +252,102 @@ def test_database_error_returns_503_without_connection_details(api_settings: Set
     assert response.status_code == 503
     assert "服务暂不可用" in response.json()["detail"]
     assert "secret" not in response.text
+
+
+@pytest.fixture
+def import_client(tmp_path, monkeypatch):
+    """导入接口使用内存事务仓库，后台任务在测试请求返回前执行完成。"""
+    import backend.api as api_module
+    from tests.test_excel_import import MemoryRepository, MemorySession, ImportEncoder, import_settings
+
+    session = MemorySession()
+    settings = import_settings(tmp_path)
+    monkeypatch.setattr(api_module, "ImageRepository", MemoryRepository)
+
+    def runner(job_id, workbook_path):
+        from backend.excel_import import ExcelImportService
+
+        ExcelImportService(settings, ImportEncoder(), lambda: session,
+                           repository_factory=MemoryRepository).run(job_id, workbook_path)
+
+    app = create_app(settings=settings, encoder=ImportEncoder(), session_factory=lambda: session,
+                     import_runner=runner)
+    with TestClient(app) as test_client:
+        yield test_client, settings, session
+
+
+def small_import_workbook():
+    """最小真实 XLSX 包经过正式解析器，避免只验证假启动器。"""
+    output = BytesIO()
+    with ZipFile(output, "w") as archive:
+        archive.writestr("xl/workbook.xml", '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="地毯图片" r:id="s1"/></sheets></workbook>')
+        archive.writestr("xl/_rels/workbook.xml.rels", '<Relationships><Relationship Id="s1" Target="worksheets/sheet1.xml"/></Relationships>')
+        archive.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row><c r="F2" t="inlineStr"><is><t>00123</t></is></c></row></sheetData><drawing r:id="d1"/></worksheet>')
+        archive.writestr("xl/worksheets/_rels/sheet1.xml.rels", '<Relationships><Relationship Id="d1" Target="../drawings/drawing1.xml"/></Relationships>')
+        archive.writestr("xl/drawings/drawing1.xml", '<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><col>11</col><row>1</row></from><pic><blip r:embed="i1"/></pic></oneCellAnchor></drawing>')
+        archive.writestr("xl/drawings/_rels/drawing1.xml.rels", '<Relationships><Relationship Id="i1" Target="../media/image1.png"/></Relationships>')
+        archive.writestr("xl/media/image1.png", png_bytes())
+    return output.getvalue()
+
+
+def test_import_upload_queries_completed_job_and_removes_temporary_directory(import_client, monkeypatch):
+    """上传应返回不含路径的任务 ID，查询应读取后台提交的真实导入结果。"""
+    client, settings, session = import_client
+    from starlette.datastructures import UploadFile
+
+    reads = []
+    original_read = UploadFile.read
+
+    async def chunked_read(upload, size=-1):
+        reads.append(size)
+        return await original_read(upload, size)
+
+    monkeypatch.setattr(UploadFile, "read", chunked_read)
+    response = client.post("/api/imports", files={"workbook": ("商品.xlsx", small_import_workbook())})
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"job_id", "status"}
+    assert payload["status"] == "parsing"
+    assert len(payload["job_id"]) == 32 and int(payload["job_id"], 16) >= 0
+    status = client.get(f"/api/imports/{payload['job_id']}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "completed"
+    assert status.json()["processed"] == status.json()["total"] == 1
+    assert status.json()["summary"]["encoded"] == 1
+    assert status.json()["error"] is None
+    assert not (settings.import_job_dir / payload["job_id"]).exists()
+    assert len(session.state["images"]) == 1
+    assert reads and all(size == 1024 * 1024 for size in reads)
+
+
+def test_import_rejects_non_xlsx_and_returns_404_for_unknown_job(import_client):
+    client, settings, session = import_client
+    response = client.post("/api/imports", files={"workbook": ("商品.xls", b"wrong")})
+    assert response.status_code == 400
+    assert not session.state["jobs"]
+    assert client.get("/api/imports/" + "0" * 32).status_code == 404
+
+
+def test_import_workbook_error_is_public_and_temporary_files_are_removed(import_client):
+    client, settings, _ = import_client
+    response = client.post("/api/imports", files={"workbook": ("broken.xlsx", b"broken")})
+    job_id = response.json()["job_id"]
+    status = client.get(f"/api/imports/{job_id}").json()
+    assert status["status"] == "failed" and status["error"]
+    assert str(settings.project_root) not in json.dumps(status)
+    assert not (settings.import_job_dir / job_id).exists()
+
+
+def test_import_upload_database_failure_cleans_files_without_exposing_error(import_client, monkeypatch):
+    """任务首次入库失败时，上传目录必须清理且错误不得回显连接信息。"""
+    client, settings, session = import_client
+
+    def fail_commit():
+        raise SQLAlchemyError("postgresql://user:secret@host/db")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+    response = client.post("/api/imports", files={"workbook": ("商品.xlsx", small_import_workbook())})
+    assert response.status_code == 503
+    assert "secret" not in response.text
+    assert not list(settings.import_job_dir.iterdir())
+    assert not session.state["jobs"]

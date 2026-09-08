@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+import json
+from pathlib import Path, PureWindowsPath
+from uuid import uuid4
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
@@ -15,6 +18,7 @@ from backend.config import Settings
 from backend.db import create_session_factory, dispose_session_factory
 from backend.encoders.base import EncoderIdentity, ImageEncoder
 from backend.encoders.factory import create_encoder
+from backend.excel_import import ExcelImportService, cleanup_import_job
 from backend.image_assets import InvalidImageError, validate_image_bytes
 from backend.repository import ImageRepository
 
@@ -95,12 +99,16 @@ def create_app(
     encoder: ImageEncoder | None = None,
     *,
     session_factory: sessionmaker[Session] | Callable[[], Session] | None = None,
+    import_runner: Callable[[str, Path], None] | None = None,
 ) -> FastAPI:
     """创建 API 应用；注入项仅用于测试或嵌入式调用，不会提前加载模型。"""
     application_settings = settings or Settings.load()
     application_encoder = encoder or create_encoder(application_settings)
     owns_session_factory = session_factory is None
     application_session_factory = session_factory or create_session_factory(application_settings)
+    application_import_runner = import_runner or ExcelImportService(
+        application_settings, application_encoder, application_session_factory
+    ).run
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -126,6 +134,56 @@ def create_app(
     def get_repository(session: Session = Depends(get_session)) -> ImageRepository:
         """将请求会话包装为仓库，路由不直接依赖持久层模型。"""
         return ImageRepository(session)
+
+    @app.post("/api/imports")
+    async def import_workbook(
+        background_tasks: BackgroundTasks,
+        workbook: UploadFile = File(...),
+        session: Session = Depends(get_session),
+    ) -> dict[str, str]:
+        """分块保存 XLSX，提交任务状态后交由后台线程处理。"""
+        job_id = uuid4().hex
+        try:
+            original_name = PureWindowsPath(workbook.filename or "").name
+            if Path(original_name).suffix.lower() != ".xlsx":
+                raise HTTPException(status_code=400, detail="仅支持上传 .xlsx 工作簿。")
+            job_dir = application_settings.import_job_dir / job_id
+            job_dir.mkdir(parents=True, exist_ok=False)
+            workbook_path = job_dir / "workbook.xlsx"
+            with workbook_path.open("wb") as output:
+                while chunk := await workbook.read(1024 * 1024):
+                    output.write(chunk)
+            repository = ImageRepository(session)
+            repository.create_import_job(job_id, original_name)
+            repository.update_import_job(job_id, status="parsing")
+            session.commit()
+            background_tasks.add_task(application_import_runner, job_id, workbook_path)
+            return {"job_id": job_id, "status": "parsing"}
+        except HTTPException:
+            cleanup_import_job(application_settings, job_id)
+            raise
+        except Exception as error:
+            session.rollback()
+            cleanup_import_job(application_settings, job_id)
+            raise HTTPException(status_code=503, detail="上传失败，服务暂不可用，请稍后重试。") from error
+        finally:
+            await workbook.close()
+
+    @app.get("/api/imports/{job_id}")
+    def import_status(job_id: str, repository: ImageRepository = Depends(get_repository)) -> dict[str, object]:
+        """返回后台持久化状态及 JSON 汇总，不向客户端暴露文件路径。"""
+        try:
+            job = repository.find_import_job(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="导入任务不存在。")
+            summary = json.loads(job.summary_json) if job.summary_json else {}
+        except (SQLAlchemyError, ValueError) as error:
+            raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
+        return {
+            "job_id": job.job_id, "status": job.status,
+            "processed": job.processed, "total": job.total,
+            "summary": summary, "error": job.error_message,
+        }
 
     @app.get("/health")
     def health(session: Session = Depends(get_session)) -> dict[str, object]:

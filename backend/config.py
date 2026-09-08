@@ -33,6 +33,11 @@ class Settings:
         """返回图库目录；图片二进制只允许持久化在此目录。"""
         return self.project_root / "data" / "images"
 
+    @property
+    def import_job_dir(self) -> Path:
+        """返回每个 Excel 导入任务各自使用的临时目录根路径。"""
+        return self.project_root / "data" / "import_jobs"
+
     @classmethod
     def load(cls, project_root: Path | None = None) -> "Settings":
         """从项目 .env 和进程环境变量读取配置，后者优先。"""
