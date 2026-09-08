@@ -5,6 +5,8 @@ data/images/
 data/import_jobs/
 __pycache__/
 .pytest_cache/
+.pytest-tmp/
+.tmp-merge-*/
 *.py[cod]
 .superpowers/
 .worktrees/

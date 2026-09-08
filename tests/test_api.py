@@ -20,7 +20,7 @@ from backend.api import create_app
 from backend.config import Settings
 from backend.db import create_database_and_schema, create_session_factory, dispose_session_factory
 from backend.encoders.base import EncoderIdentity, normalize_embedding
-from backend.repository import ImageRepository
+from backend.repository import ImageMetadata, ImageRepository
 
 
 class FakeEncoder:
@@ -34,6 +34,13 @@ class FakeEncoder:
     def encode(self, _image: Image.Image) -> np.ndarray:
         self.encode_calls += 1
         return normalize_embedding(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+
+
+class FailingEncoder(FakeEncoder):
+    """模拟服务工作单元内部编码失败，验证 API 不泄漏底层异常。"""
+
+    def encode(self, _image: Image.Image) -> np.ndarray:
+        raise RuntimeError("internal encoder failure")
 
 
 def png_bytes(color: str = "red") -> bytes:
@@ -76,7 +83,8 @@ def api_session_factory(database_engine):
     try:
         yield factory
     finally:
-        transaction.rollback()
+        if transaction.is_active:
+            transaction.rollback()
         connection.close()
 
 
@@ -99,9 +107,36 @@ def fake_encoder() -> FakeEncoder:
 
 
 @pytest.fixture
-def client(api_settings: Settings, api_session_factory, fake_encoder: FakeEncoder):
+def frontend_root(tmp_path: Path) -> Path:
+    """复制真实首页并隔离其余静态资源，验证入口契约和白名单路由。"""
+    root = tmp_path / "frontend"
+    root.mkdir()
+    (root / "index.html").write_text(
+        (Path(__file__).parents[1] / "index.html").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (root / "styles.css").write_text("body { color: black; }", encoding="utf-8")
+    (root / "matcher-core.js").write_text("export const matcher = {};", encoding="utf-8")
+    (root / "api-client.js").write_text("export const api = {};", encoding="utf-8")
+    (root / "app.js").write_text("export const app = {};", encoding="utf-8")
+    (root / "not-registered.env").write_text("SECRET=not-served", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def client(
+    api_settings: Settings,
+    api_session_factory,
+    fake_encoder: FakeEncoder,
+    frontend_root: Path,
+):
     """通过真实 FastAPI 路由测试，请求会话由测试事务包裹。"""
-    app = create_app(settings=api_settings, encoder=fake_encoder, session_factory=api_session_factory)
+    app = create_app(
+        settings=api_settings,
+        encoder=fake_encoder,
+        session_factory=api_session_factory,
+        frontend_root=frontend_root,
+    )
     with TestClient(app) as test_client:
         yield test_client
 
@@ -131,6 +166,21 @@ def add_image(repository: ImageRepository, settings: Settings, *, name: str = "a
     return image.id, content
 
 
+def all_metadata() -> ImageMetadata:
+    """返回九个字段均有值的固定元数据，用于检查 HTTP 映射不漂移。"""
+    return ImageMetadata(
+        sku="RUG-001",
+        product_name="云朵地毯",
+        size="160×230cm",
+        price=899,
+        room="客厅",
+        style="奶油风",
+        color="米白",
+        stock="现货",
+        selling_point="柔软亲肤",
+    )
+
+
 def test_health_checks_database_without_encoding_an_image(client: TestClient, fake_encoder: FakeEncoder) -> None:
     """若健康检查改为读取编码器身份，会在真实 OpenCLIP 下意外下载或加载模型。"""
     response = client.get("/health")
@@ -146,6 +196,9 @@ def test_library_lists_images_with_available_model_identities(
 ) -> None:
     """若遗漏 embedding 查询，前端将无法知道图片可用于哪个模型空间。"""
     image_id, _content = add_image(repository, api_settings, name="library.png")
+    record = repository.find_by_id(image_id)
+    assert record is not None
+    repository.update_metadata(record, all_metadata())
 
     response = client.get("/api/library")
 
@@ -154,6 +207,86 @@ def test_library_lists_images_with_available_model_identities(
     assert image["original_name"] == "library.png"
     assert image["image_url"] == f"/api/images/{image_id}"
     assert image["models"] == [{"encoder": "fake", "name": "test-model", "pretrained": "v1", "dimension": 3}]
+    assert {key: image[key] for key in all_metadata().__dict__} == {
+        "sku": "RUG-001",
+        "product_name": "云朵地毯",
+        "size": "160×230cm",
+        "price": 899.0,
+        "room": "客厅",
+        "style": "奶油风",
+        "color": "米白",
+        "stock": "现货",
+        "selling_point": "柔软亲肤",
+    }
+
+
+def test_library_upload_persists_image_vector_and_optional_metadata(
+    client: TestClient,
+    repository: ImageRepository,
+) -> None:
+    """若上传未复用入库服务，图片、向量或商品资料会缺失。"""
+    response = client.post(
+        "/api/library",
+        files={"image": ("buyer.png", png_bytes(), "image/png")},
+        data={"product_name": " 云朵地毯 ", "price": "899.00", "room": "客厅"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "imported"
+    assert response.json()["image"]["product_name"] == "云朵地毯"
+    assert response.json()["image"]["price"] == 899.0
+    assert repository.image_count() == 1
+    assert repository.embedding_count() == 1
+
+
+def test_library_duplicate_upload_preserves_and_supplements_metadata(
+    client: TestClient,
+    repository: ImageRepository,
+) -> None:
+    """若重复上传覆盖空字段，渐进补充资料会破坏已有商品信息。"""
+    content = png_bytes()
+    first = client.post(
+        "/api/library",
+        files={"image": ("buyer.png", content, "image/png")},
+        data={"product_name": "云朵地毯", "price": "899.00"},
+    )
+
+    second = client.post(
+        "/api/library",
+        files={"image": ("duplicate.png", content, "image/png")},
+        data={"style": "奶油风", "product_name": "  "},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["image"]["product_name"] == "云朵地毯"
+    assert second.json()["image"]["price"] == 899.0
+    assert second.json()["image"]["style"] == "奶油风"
+    assert repository.image_count() == 1
+    assert repository.embedding_count() == 1
+
+
+def test_library_upload_maps_service_failure_to_503(
+    api_settings: Settings,
+    api_session_factory,
+    frontend_root: Path,
+) -> None:
+    """若服务 FAILED 被当作成功，客户端会收到不存在的图片结果。"""
+    app = create_app(
+        settings=api_settings,
+        encoder=FailingEncoder(),
+        session_factory=api_session_factory,
+        frontend_root=frontend_root,
+    )
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/api/library",
+            files={"image": ("buyer.png", png_bytes(), "image/png")},
+        )
+
+    assert response.status_code == 503
+    assert "internal encoder failure" not in response.text
 
 
 def test_image_endpoint_reads_only_database_registered_library_file(
@@ -182,6 +315,9 @@ def test_search_returns_ranked_results_without_persisting_query(
 ) -> None:
     """若搜索走导入路径，查询上传会污染图库和图片表。"""
     image_id, _content = add_image(repository, api_settings, name="same-carpet-angle.png")
+    record = repository.find_by_id(image_id)
+    assert record is not None
+    repository.update_metadata(record, all_metadata())
     before = repository.image_count()
 
     response = client.post(
@@ -200,6 +336,15 @@ def test_search_returns_ranked_results_without_persisting_query(
             "original_name": "same-carpet-angle.png",
             "image_url": f"/api/images/{image_id}",
             "similarity": 100.0,
+            "sku": "RUG-001",
+            "product_name": "云朵地毯",
+            "size": "160×230cm",
+            "price": 899.0,
+            "room": "客厅",
+            "style": "奶油风",
+            "color": "米白",
+            "stock": "现货",
+            "selling_point": "柔软亲肤",
         }
     ]
     assert repository.image_count() == before
@@ -226,6 +371,70 @@ def test_search_rejects_corrupt_uploaded_image_with_400(client: TestClient) -> N
 
     assert response.status_code == 400
     assert "图片" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("files", "data"),
+    [
+        ({"image": ("oversized.png", b"x" * (20 * 1024 * 1024 + 1), "image/png")}, {}),
+        ({"image": ("broken.png", b"not-an-image", "image/png")}, {}),
+        ({"image": ("buyer.png", png_bytes(), "image/png")}, {"price": "-0.01"}),
+    ],
+    ids=["oversized", "corrupt", "negative-price"],
+)
+def test_library_upload_rejects_invalid_input_without_internal_details(
+    client: TestClient,
+    files: dict[str, tuple[str, bytes, str]],
+    data: dict[str, str],
+) -> None:
+    """若上传校验未在事务前收口，非法输入可能变成内部服务异常。"""
+    response = client.post("/api/library", files=files, data=data)
+
+    assert response.status_code == 400
+    assert "Traceback" not in response.text
+    assert "InvalidImageError" not in response.text
+
+
+def test_library_upload_rejects_price_above_database_precision(client: TestClient) -> None:
+    """超过 NUMERIC(12,2) 上限的价格必须在 API 边界返回 400。"""
+    response = client.post(
+        "/api/library",
+        files={"image": ("buyer.png", png_bytes(), "image/png")},
+        data={"price": "10000000000.00"},
+    )
+
+    assert response.status_code == 400
+    assert "服务暂不可用" not in response.text
+
+
+def test_root_serves_frontend_and_only_registered_assets(client: TestClient) -> None:
+    """若挂载整个目录，未注册配置文件可能被同源静态路由暴露。"""
+    assert client.get("/").status_code == 200
+    html = client.get("/").text
+    assert '<script src="api-client.js"></script>' in html
+    assert 'id="seedButton"' not in html
+    assert 'id="clearButton"' not in html
+    assert 'id="entryStatus"' in html
+    assert 'id="reloadLibraryButton"' in html
+    assert client.get("/styles.css").headers["content-type"].startswith("text/css")
+    assert client.get("/matcher-core.js").status_code == 200
+    assert client.get("/api-client.js").status_code == 200
+    assert client.get("/app.js").status_code == 200
+    assert client.get("/not-registered.env").status_code == 404
+
+
+def test_default_frontend_root_is_independent_from_library_project_root(
+    api_settings: Settings,
+    api_session_factory,
+    fake_encoder: FakeEncoder,
+) -> None:
+    """若默认静态根跟随临时图库根，正常部署的首页会错误返回缺失。"""
+    app = create_app(settings=api_settings, encoder=fake_encoder, session_factory=api_session_factory)
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/")
+
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("top_k", [0, 51])

@@ -59,7 +59,7 @@ class OpenClipEncoder:
                     self._settings.clip_model_name,
                     pretrained=self._settings.clip_pretrained,
                     device=device,
-                    cache_dir=str(self._settings.project_root / ".cache" / "open_clip"),
+                    cache_dir=str(self._settings.clip_cache_dir),
                 )
                 model.eval()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 import uuid
 from unittest.mock import MagicMock
 
@@ -13,10 +14,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.config import Settings
-from backend.db import create_database_and_schema, create_session_factory, dispose_session_factory
+from backend.db import (
+    _upgrade_image_metadata_columns,
+    create_database_and_schema,
+    create_session_factory,
+    dispose_session_factory,
+)
 from backend.encoders.base import EncoderIdentity
 from backend.models import ImageEmbedding, ImageRecord
-from backend.repository import ImageRepository, cosine_distance_to_percent
+from backend.repository import ImageMetadata, ImageRepository, cosine_distance_to_percent
 
 
 def unit(values: list[float]) -> np.ndarray:
@@ -116,6 +122,50 @@ def test_schema_initialization_is_idempotent_and_enables_vector(settings: Settin
     assert db_session.execute(text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")).scalar_one()
 
 
+def test_old_schema_metadata_upgrade_is_repeatable_and_preserves_existing_image(
+    repository: ImageRepository, db_session: Session
+) -> None:
+    """旧表补齐元数据列可重复执行，且不影响已有图片记录。"""
+    image = add_test_image(repository, "legacy.jpg")
+    db_session.execute(text("ALTER TABLE images DROP CONSTRAINT IF EXISTS ck_images_price_nonnegative"))
+    for column in (
+        "sku",
+        "product_name",
+        "size",
+        "price",
+        "room",
+        "style",
+        "color",
+        "stock",
+        "selling_point",
+    ):
+        db_session.execute(text(f"ALTER TABLE images DROP COLUMN IF EXISTS {column}"))
+
+    connection = db_session.connection()
+    _upgrade_image_metadata_columns(connection)
+    _upgrade_image_metadata_columns(connection)
+    db_session.expire_all()
+
+    restored = repository.find_by_id(image.id)
+    assert restored is not None
+    assert restored.original_name == "legacy.jpg"
+    columns = db_session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'images' "
+            "AND column_name IN ('sku', 'product_name', 'size', 'price', 'room', 'style', 'color', 'stock', 'selling_point') "
+            "ORDER BY column_name"
+        )
+    ).scalars().all()
+    assert columns == ["color", "price", "product_name", "room", "selling_point", "size", "sku", "stock", "style"]
+    assert db_session.execute(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+            "WHERE conname = 'ck_images_price_nonnegative' AND conrelid = 'images'::regclass)"
+        )
+    ).scalar_one()
+
+
 def test_dispose_session_factory_disposes_its_bound_engine() -> None:
     """长期 CLI/API 进程可显式释放连接池，避免测试或短命令残留连接。"""
     engine = MagicMock()
@@ -152,6 +202,23 @@ def test_repository_finds_lists_counts_and_normalizes_relative_paths(repository:
     assert found.stored_path == "data/images/fixture.jpg"
     assert [item.id for item in repository.list_images() if item.id == image.id] == [image.id]
     assert repository.image_count() == count_before + 1
+
+
+def test_repository_persists_optional_metadata_and_blank_update_keeps_existing(repository: ImageRepository) -> None:
+    """空白元数据更新只能覆盖给定字段，避免前端局部编辑抹掉既有资料。"""
+    image = add_test_image(repository)
+    repository.update_metadata(
+        image,
+        ImageMetadata(product_name="云朵地毯", price=Decimal("899.00"), room="客厅"),
+    )
+    repository.update_metadata(image, ImageMetadata(product_name=None, room="卧室"))
+
+    row = next(row for row in repository.list_library() if row.image_id == image.id)
+
+    assert row.product_name == "云朵地毯"
+    assert row.price == Decimal("899.00")
+    assert row.room == "卧室"
+    assert row.sku is None
 
 
 @pytest.mark.parametrize("stored_path", ["", ".", "../outside.jpg", "/absolute.jpg", "C:\\outside.jpg"])
@@ -195,6 +262,20 @@ def test_search_filters_full_identity_orders_by_cosine_distance_and_excludes_sam
     unwanted_model = add_test_image(repository, "other-model.jpg")
     unwanted_weights = add_test_image(repository, "other-weights.jpg")
     unwanted_dimension = add_test_image(repository, "other-dimension.jpg")
+    repository.update_metadata(
+        same_carpet,
+        ImageMetadata(
+            sku="CARPET-001",
+            product_name="云朵地毯",
+            size="200x300cm",
+            price=Decimal("899.00"),
+            room="客厅",
+            style="北欧",
+            color="米白",
+            stock="有货",
+            selling_point="柔软易打理",
+        ),
+    )
     model_suffix = uuid.uuid4().hex
     identity = EncoderIdentity("fake", f"model-a-{model_suffix}", "v1", 3)
     repository.upsert_embedding(query_file, identity, unit([1, 0, 0]))
@@ -214,6 +295,27 @@ def test_search_filters_full_identity_orders_by_cosine_distance_and_excludes_sam
     assert rows[0].similarity_percent == 100.0
     assert rows[1].similarity_percent == 70.71
     assert rows[0].stored_path == "data/images/fixture.jpg"
+    assert (
+        rows[0].sku,
+        rows[0].product_name,
+        rows[0].size,
+        rows[0].price,
+        rows[0].room,
+        rows[0].style,
+        rows[0].color,
+        rows[0].stock,
+        rows[0].selling_point,
+    ) == (
+        "CARPET-001",
+        "云朵地毯",
+        "200x300cm",
+        Decimal("899.00"),
+        "客厅",
+        "北欧",
+        "米白",
+        "有货",
+        "柔软易打理",
+    )
 
 
 @pytest.mark.parametrize(

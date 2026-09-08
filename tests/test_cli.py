@@ -21,6 +21,7 @@ def _settings(tmp_path: Path) -> Settings:
         clip_model_name="ViT-B-32",
         clip_pretrained="openai",
         model_device="cpu",
+        clip_cache_dir=tmp_path / ".cache" / "open_clip",
     )
 
 

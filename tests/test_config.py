@@ -36,6 +36,17 @@ def test_settings_environment_overrides_project_dotenv(tmp_path: Path, monkeypat
     assert settings.postgres_host == "environment-host"
 
 
+def test_settings_accepts_shared_open_clip_cache_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """部署配置应能把 OpenCLIP 指向已经下载好的共享权重目录。"""
+    shared_cache = tmp_path / "shared-open-clip"
+    monkeypatch.setenv("POSTGRES_PASSWORD", "test-password")
+    monkeypatch.setenv("CLIP_CACHE_DIR", str(shared_cache))
+
+    settings = Settings.load(tmp_path)
+
+    assert settings.clip_cache_dir == shared_cache.resolve()
+
+
 def test_settings_loads_each_project_dotenv_without_cross_project_leakage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

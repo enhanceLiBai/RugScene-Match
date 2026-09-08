@@ -1,17 +1,256 @@
-const dbName = 'carpet-matcher-mvp';
-let db, queryFile, queryFeature;
+const api = CarpetApiClient.create();
+let queryFile;
+let latestLibraryRequest = 0;
+let hasLoadedLibrary = false;
+const previewUrls = new WeakMap();
 const $ = (selector) => document.querySelector(selector);
 
-function openDB() { return new Promise((resolve, reject) => { const request = indexedDB.open(dbName, 1); request.onupgradeneeded = () => { const store = request.result.createObjectStore('shows', { keyPath: 'id', autoIncrement: true }); store.createIndex('createdAt', 'createdAt'); }; request.onsuccess = () => { db = request.result; resolve(); }; request.onerror = () => reject(request.error); }); }
-function entries() { return new Promise((resolve, reject) => { const req = db.transaction('shows', 'readonly').objectStore('shows').getAll(); req.onsuccess = () => resolve(req.result.sort((a,b) => b.createdAt-a.createdAt)); req.onerror = () => reject(req.error); }); }
-function put(item) { return new Promise((resolve,reject)=>{const r=db.transaction('shows','readwrite').objectStore('shows').add(item);r.onsuccess=resolve;r.onerror=()=>reject(r.error);}); }
-function clearAll() { return new Promise((resolve,reject)=>{const r=db.transaction('shows','readwrite').objectStore('shows').clear();r.onsuccess=resolve;r.onerror=()=>reject(r.error);}); }
-function fileToURL(file) { return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);}); }
-function makeFeature(src) { return new Promise((resolve,reject)=>{ const image=new Image(); image.onload=()=>{const c=document.createElement('canvas');c.width=c.height=48;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0,48,48);const d=ctx.getImageData(0,0,48,48).data, vals=[]; for(let gy=0;gy<3;gy++)for(let gx=0;gx<3;gx++){let r=0,g=0,b=0,n=0;for(let y=gy*16;y<(gy+1)*16;y++)for(let x=gx*16;x<(gx+1)*16;x++){const i=(y*48+x)*4;r+=d[i];g+=d[i+1];b+=d[i+2];n++;}vals.push(r/n,g/n,b/n);} resolve({v:vals,ratio:image.naturalWidth/image.naturalHeight});}; image.onerror=reject; image.src=src; }); }
-async function refreshLibrary(){const data=await entries();$('#libraryCount').textContent=data.length;const grid=$('#libraryGrid');grid.innerHTML=data.length?'': '<p class="empty">还没有买家秀。请先录入真实图片，商品信息可以稍后补充。</p>';data.forEach(x=>{const e=document.createElement('div');const view=CarpetMatcherCore.buildPresentation(x);e.className='library-item';e.innerHTML=`<img src="${x.image}" alt=""><div><strong>${view.productName}</strong><small>SKU：${view.sku}</small><small>${view.chips.join(' · ')||'元数据未填写'}</small></div>`;grid.append(e);});}
-async function displayResults(){const data=await entries();if(!data.length){$('#matchHint').textContent='图库还没有数据，请切到“买家秀图库”录入图片，或载入演示数据。';return;}const ranked=CarpetMatcherCore.rankBySimilarity(queryFeature,data);const grid=$('#resultGrid');grid.innerHTML='';const template=$('#resultTemplate');ranked.forEach(item=>{const n=template.content.cloneNode(true);const card=n.querySelector('.result-card');const view=CarpetMatcherCore.buildPresentation(item);n.querySelector('img').src=item.image;n.querySelector('.score').textContent=`匹配度 ${item.score}%`;n.querySelector('.match-reason').textContent=item.reason;n.querySelector('h4').textContent=view.productName;n.querySelector('.sku-line').textContent=`SKU：${view.sku}`;n.querySelector('.chips').innerHTML=view.chips.map(v=>`<span>${v}</span>`).join('');n.querySelector('.product-info').textContent=view.productInfo;const words=CarpetMatcherCore.buildRecommendationScript(item);n.querySelector('blockquote').textContent=words;n.querySelector('.copy-button').onclick=async(e)=>{await navigator.clipboard.writeText(words);e.target.textContent='已复制';setTimeout(()=>e.target.textContent='复制话术',1400);};n.querySelectorAll('[data-feedback]').forEach(b=>b.onclick=()=>{b.parentElement.innerHTML='<span>反馈已记录，后续会用于优化排序。</span>';});grid.append(card);});$('#resultCount').textContent=`展示 Top ${ranked.length}`;$('#results').hidden=false;$('#matchHint').textContent='结果仅按图片色调与画面构图的视觉相似度排序。';}
-function preview(input,img,copy){const file=input.files[0];if(!file)return;fileToURL(file).then(url=>{img.src=url;img.hidden=false;if(copy)copy.hidden=true;});}
-const demo=[['演示-客厅-奶油风','CT-208-CRM','云朵奶油风地毯','160×230cm',899,'客厅','奶油风','米白、浅咖','现货','短绒易打理，米白色能提亮小户型客厅。'],['演示-客厅-原木风','CT-317-WD','原木侘寂编织地毯','200×300cm',1299,'客厅','原木风','燕麦、焦糖','现货','低饱和燕麦色耐看，适合木质家具与大客厅。'],['演示-卧室-现代','CT-156-GY','轻奢灰调绒感地毯','140×200cm',699,'卧室','现代简约','浅灰、银灰','预售','细密绒面脚感柔软，灰调不易显脏。']];
-async function createDemoImage(title, colors){const c=document.createElement('canvas');c.width=700;c.height=460;const x=c.getContext('2d');x.fillStyle=colors[0];x.fillRect(0,0,700,460);x.fillStyle=colors[1];x.fillRect(0,310,700,150);x.fillStyle=colors[2];x.fillRect(170,235,365,150);x.fillStyle='#f8f4ea';x.fillRect(65,80,250,220);x.fillStyle='#6d604e';x.fillRect(420,100,160,165);x.fillStyle='rgba(255,255,255,.6)';x.font='22px sans-serif';x.fillText(title,25,430);return c.toDataURL('image/jpeg',.8);}
-async function seed(){if((await entries()).length){alert('图库已有数据，无需重复载入。');return;}const palettes=[['#ede6da','#c8b397','#d5c4a7'],['#ddd2be','#b39975','#ad9271'],['#e6e8e6','#b4b7b4','#8b8c8a']];for(let i=0;i<demo.length;i++){const d=demo[i],image=await createDemoImage(d[0],palettes[i]);await put({image,feature:await makeFeature(image),sku:d[1],productName:d[2],size:d[3],price:d[4],room:d[5],style:d[6],color:d[7],stock:d[8],sellingPoint:d[9],createdAt:Date.now()+i});}await refreshLibrary();alert('已载入 3 条演示数据。请用真实买家秀替换它们后再给客服使用。');}
-document.addEventListener('DOMContentLoaded',async()=>{await openDB();await refreshLibrary();document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.view').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.view).classList.add('active');});$('#queryImage').onchange=async e=>{queryFile=e.target.files[0];preview(e.target,$('#queryPreview'),$('.dropzone-copy'));if(queryFile)queryFeature=await makeFeature(await fileToURL(queryFile));};$('#entryImage').onchange=e=>preview(e.target,$('#entryPreview'),$('#entryImageText'));$('#matchButton').onclick=async()=>{if(!queryFeature)return alert('请先上传客户家的照片。');await displayResults();};$('#entryForm').onsubmit=async e=>{e.preventDefault();const file=$('#entryImage').files[0],image=await fileToURL(file);const priceValue=$('#price').value.trim();await put({image,feature:await makeFeature(image),sku:$('#sku').value.trim(),productName:$('#productName').value.trim(),size:$('#size').value.trim(),price:priceValue===''?'':Number(priceValue),room:$('#room').value,style:$('#style').value,color:$('#color').value.trim(),stock:$('#stock').value,sellingPoint:$('#sellingPoint').value.trim(),createdAt:Date.now()});e.target.reset();$('#entryPreview').hidden=true;$('#entryImageText').hidden=false;await refreshLibrary();alert('已加入图库。');};$('#seedButton').onclick=seed;$('#clearButton').onclick=async()=>{if(confirm('将删除此浏览器中保存的所有买家秀数据，确定吗？')){await clearAll();await refreshLibrary();}};});
+function statusClass(kind) {
+  return kind === 'error' ? 'status-message error' : 'status-message';
+}
+
+function setStatus(element, message, kind) {
+  element.textContent = message;
+  element.className = statusClass(kind);
+  element.hidden = !message;
+}
+
+/** 从后端刷新图库；失败时保留可见重试入口。 */
+async function refreshLibrary() {
+  const requestId = ++latestLibraryRequest;
+  const button = $('#reloadLibraryButton');
+  setBusy(button, true, '刷新中…');
+  setStatus($('#libraryStatus'), '正在读取图库…');
+  try {
+    const payload = await api.listLibrary();
+    if (requestId !== latestLibraryRequest) return;
+    renderLibrary(payload.images || []);
+    hasLoadedLibrary = true;
+    setStatus($('#libraryStatus'), '');
+  } catch (error) {
+    if (requestId !== latestLibraryRequest) return;
+    if (!hasLoadedLibrary) $('#libraryCount').textContent = '—';
+    setStatus($('#libraryStatus'), error.message || '图库加载失败，请稍后重试。', 'error');
+  } finally {
+    if (requestId === latestLibraryRequest) setBusy(button, false, '刷新中…');
+  }
+}
+
+function renderLibrary(images) {
+  const grid = $('#libraryGrid');
+  grid.replaceChildren();
+  $('#libraryCount').textContent = String(images.length);
+
+  if (!images.length) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = '还没有买家秀。请先录入真实图片，商品信息可以稍后补充。';
+    grid.append(empty);
+    return;
+  }
+
+  images.forEach((item) => {
+    const view = CarpetMatcherCore.buildPresentation(item);
+    const entry = document.createElement('div');
+    const image = document.createElement('img');
+    const details = document.createElement('div');
+    const name = document.createElement('strong');
+    const sku = document.createElement('small');
+    const chips = document.createElement('small');
+
+    entry.className = 'library-item';
+    image.src = item.image_url;
+    image.alt = view.productName;
+    name.textContent = view.productName;
+    sku.textContent = `SKU：${view.sku}`;
+    chips.textContent = view.chips.join(' · ') || '元数据未填写';
+    details.append(name, sku, chips);
+    entry.append(image, details);
+    grid.append(entry);
+  });
+}
+
+function renderResults(payload) {
+  const matches = payload.results || [];
+  const grid = $('#resultGrid');
+  grid.replaceChildren();
+
+  if (!matches.length) {
+    $('#results').hidden = true;
+    $('#matchHint').textContent = payload.message || '没有找到可用的相似买家秀。';
+    return;
+  }
+
+  matches.forEach((item) => {
+    const fragment = $('#resultTemplate').content.cloneNode(true);
+    const view = CarpetMatcherCore.buildPresentation(item);
+    const card = fragment.querySelector('.result-card');
+    const chips = fragment.querySelector('.chips');
+
+    fragment.querySelector('img').src = item.image_url;
+    fragment.querySelector('.score').textContent = `匹配度 ${item.similarity}%`;
+    fragment.querySelector('.match-reason').textContent = view.matchReason;
+    fragment.querySelector('h4').textContent = view.productName;
+    fragment.querySelector('.sku-line').textContent = `SKU：${view.sku}`;
+    view.chips.forEach((value) => {
+      const chip = document.createElement('span');
+      chip.textContent = value;
+      chips.append(chip);
+    });
+    fragment.querySelector('.product-info').textContent = view.productInfo;
+
+    const words = CarpetMatcherCore.buildRecommendationScript(item);
+    fragment.querySelector('blockquote').textContent = words;
+    fragment.querySelector('.copy-button').onclick = async (event) => {
+      await navigator.clipboard.writeText(words);
+      event.currentTarget.textContent = '已复制';
+      setTimeout(() => { event.currentTarget.textContent = '复制话术'; }, 1400);
+    };
+    fragment.querySelectorAll('[data-feedback]').forEach((button) => {
+      button.onclick = () => {
+        const message = document.createElement('span');
+        message.textContent = '反馈已记录，后续会用于优化排序。';
+        button.parentElement.replaceChildren(message);
+      };
+    });
+    grid.append(card);
+  });
+
+  $('#resultCount').textContent = `展示 Top ${matches.length}`;
+  $('#results').hidden = false;
+  $('#matchHint').textContent = '结果按 OpenCLIP 图片向量相似度排序。';
+}
+
+function readEntryMetadata() {
+  return {
+    sku: $('#sku').value.trim(),
+    product_name: $('#productName').value.trim(),
+    size: $('#size').value.trim(),
+    price: $('#price').value.trim(),
+    room: $('#room').value,
+    style: $('#style').value,
+    color: $('#color').value.trim(),
+    stock: $('#stock').value,
+    selling_point: $('#sellingPoint').value.trim(),
+  };
+}
+
+function setBusy(button, busy, busyText) {
+  if (!button.dataset.idleText) button.dataset.idleText = button.textContent;
+  button.disabled = busy;
+  button.textContent = busy ? busyText : button.dataset.idleText;
+}
+
+function showEntryStatus(message, kind) {
+  setStatus($('#entryStatus'), message, kind);
+}
+
+function revokePreview(image) {
+  const url = previewUrls.get(image);
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  previewUrls.delete(image);
+}
+
+function clearPreview(image, copy) {
+  revokePreview(image);
+  image.hidden = true;
+  if (copy) copy.hidden = false;
+}
+
+function preview(input, image, copy) {
+  const file = input.files[0];
+  if (!file) return;
+  revokePreview(image);
+  const url = URL.createObjectURL(file);
+  previewUrls.set(image, url);
+  image.src = url;
+  image.hidden = false;
+  if (copy) copy.hidden = true;
+}
+
+function setEntryFormBusy(form, busy) {
+  Array.from(form.elements).forEach((control) => {
+    if (busy) {
+      control.dataset.entryWasDisabled = String(control.disabled);
+      control.disabled = true;
+      return;
+    }
+    control.disabled = control.dataset.entryWasDisabled === 'true';
+    delete control.dataset.entryWasDisabled;
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  refreshLibrary();
+
+  document.querySelectorAll('.tab').forEach((button) => {
+    button.onclick = () => {
+      document.querySelectorAll('.tab,.view').forEach((element) => element.classList.remove('active'));
+      button.classList.add('active');
+      $(`#${button.dataset.view}`).classList.add('active');
+    };
+  });
+
+  $('#queryImage').onchange = (event) => {
+    queryFile = event.target.files[0];
+    preview(event.target, $('#queryPreview'), $('.dropzone-copy'));
+  };
+  $('#entryImage').onchange = (event) => preview(event.target, $('#entryPreview'), $('#entryImageText'));
+  $('#reloadLibraryButton').onclick = refreshLibrary;
+  window.addEventListener('beforeunload', () => {
+    revokePreview($('#queryPreview'));
+    revokePreview($('#entryPreview'));
+  });
+
+  $('#matchButton').onclick = async () => {
+    if (!queryFile) {
+      $('#matchHint').textContent = '请先上传客户家的照片。';
+      return;
+    }
+
+    const button = $('#matchButton');
+    const input = $('#queryImage');
+    const requestedFile = queryFile;
+    setBusy(button, true, '匹配中…');
+    input.disabled = true;
+    $('#results').hidden = true;
+    $('#matchHint').textContent = '正在计算 OpenCLIP 图片向量相似度…';
+    try {
+      renderResults(await api.searchSimilar(requestedFile, 5));
+    } catch (error) {
+      $('#results').hidden = true;
+      $('#matchHint').textContent = error.message || '匹配失败，请稍后重试。';
+    } finally {
+      input.disabled = false;
+      setBusy(button, false, '匹配中…');
+    }
+  };
+
+  $('#entryForm').onsubmit = async (event) => {
+    event.preventDefault();
+    const file = $('#entryImage').files[0];
+    if (!file) {
+      showEntryStatus('请先选择买家秀图片。', 'error');
+      return;
+    }
+
+    const button = $('#entrySubmitButton');
+    const form = event.target;
+    setEntryFormBusy(form, true);
+    setBusy(button, true, '保存中…');
+    showEntryStatus('正在上传图片并生成向量…');
+    try {
+      const response = await api.uploadLibraryImage(file, readEntryMetadata());
+      form.reset();
+      clearPreview($('#entryPreview'), $('#entryImageText'));
+      showEntryStatus(response.status === 'duplicate' ? '图库已有这张图片，商品信息已补充。' : '图片已保存并加入图库。');
+      await refreshLibrary();
+    } catch (error) {
+      showEntryStatus(error.message || '图片入库失败，请稍后重试。', 'error');
+    } finally {
+      setBusy(button, false, '保存中…');
+      setEntryFormBusy(form, false);
+    }
+  };
+});

@@ -7,7 +7,10 @@ from contextlib import asynccontextmanager
 import json
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
+from decimal import Decimal, InvalidOperation
+from typing import Literal
+
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
@@ -20,10 +23,12 @@ from backend.encoders.base import EncoderIdentity, ImageEncoder
 from backend.encoders.factory import create_encoder
 from backend.excel_import import ExcelImportService, cleanup_import_job
 from backend.image_assets import InvalidImageError, validate_image_bytes
-from backend.repository import ImageRepository
+from backend.repository import ImageMetadata, ImageRepository, LibraryRow, SearchRow
+from backend.services import ImportStatus, LibraryService
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_LIBRARY_PRICE = Decimal("9999999999.99")
 
 
 class ModelResponse(BaseModel):
@@ -49,12 +54,29 @@ class LibraryImageResponse(BaseModel):
     width: int
     height: int
     models: list[ModelResponse]
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: float | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 class LibraryResponse(BaseModel):
     """图库列表响应。"""
 
     images: list[LibraryImageResponse]
+
+
+class LibraryImportResponse(BaseModel):
+    """单张图库上传的业务结果和最终图片状态。"""
+
+    status: Literal["imported", "duplicate", "embedding_added"]
+    message: str
+    image: LibraryImageResponse
 
 
 class SearchResultResponse(BaseModel):
@@ -65,6 +87,15 @@ class SearchResultResponse(BaseModel):
     original_name: str
     image_url: str
     similarity: float
+    sku: str | None = None
+    product_name: str | None = None
+    size: str | None = None
+    price: float | None = None
+    room: str | None = None
+    style: str | None = None
+    color: str | None = None
+    stock: str | None = None
+    selling_point: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -94,16 +125,72 @@ def _configured_model_response(settings: Settings) -> ModelResponse:
     )
 
 
+def _optional_text(value: str | None) -> str | None:
+    """将表单空串和纯空白统一为未提供。"""
+    cleaned = value.strip() if value is not None else ""
+    return cleaned or None
+
+
+def _optional_price(value: str | None) -> Decimal | None:
+    """解析非负且最多两位小数的参考价，持久层继续使用 Decimal。"""
+    cleaned = _optional_text(value)
+    if cleaned is None:
+        return None
+    try:
+        price = Decimal(cleaned)
+    except InvalidOperation as error:
+        raise ValueError("参考价必须是非负且最多两位小数的数字。") from error
+    if (
+        not price.is_finite()
+        or price < 0
+        or price > MAX_LIBRARY_PRICE
+        or price.as_tuple().exponent < -2
+    ):
+        raise ValueError("参考价必须是非负且最多两位小数的数字。")
+    return price
+
+
+def _metadata_response(row: LibraryRow | SearchRow) -> dict[str, str | float | None]:
+    """集中映射九个商品字段，避免图库、上传和搜索响应各自漂移。"""
+    return {
+        "sku": row.sku,
+        "product_name": row.product_name,
+        "size": row.size,
+        "price": float(row.price) if row.price is not None else None,
+        "room": row.room,
+        "style": row.style,
+        "color": row.color,
+        "stock": row.stock,
+        "selling_point": row.selling_point,
+    }
+
+
+def _library_image_response(row: LibraryRow) -> LibraryImageResponse:
+    """将仓库图库行统一映射为 HTTP 图片表示。"""
+    return LibraryImageResponse(
+        id=row.image_id,
+        original_name=row.original_name,
+        image_url=f"/api/images/{row.image_id}",
+        mime_type=row.mime_type,
+        width=row.width,
+        height=row.height,
+        models=[_model_response(identity) for identity in row.models],
+        **_metadata_response(row),
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     encoder: ImageEncoder | None = None,
     *,
     session_factory: sessionmaker[Session] | Callable[[], Session] | None = None,
     import_runner: Callable[[str, Path], None] | None = None,
+    frontend_root: Path | None = None,
 ) -> FastAPI:
     """创建 API 应用；注入项仅用于测试或嵌入式调用，不会提前加载模型。"""
     application_settings = settings or Settings.load()
     application_encoder = encoder or create_encoder(application_settings)
+    application_frontend_root = frontend_root if frontend_root is not None else Path(__file__).resolve().parent.parent
     owns_session_factory = session_factory is None
     application_session_factory = session_factory or create_session_factory(application_settings)
     application_import_runner = import_runner or ExcelImportService(
@@ -201,19 +288,69 @@ def create_app(
             rows = repository.list_library()
         except SQLAlchemyError as error:
             raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
-        return LibraryResponse(
-            images=[
-                LibraryImageResponse(
-                    id=row.image_id,
-                    original_name=row.original_name,
-                    image_url=f"/api/images/{row.image_id}",
-                    mime_type=row.mime_type,
-                    width=row.width,
-                    height=row.height,
-                    models=[_model_response(identity) for identity in row.models],
-                )
-                for row in rows
-            ]
+        return LibraryResponse(images=[_library_image_response(row) for row in rows])
+
+    @app.post("/api/library", response_model=LibraryImportResponse)
+    async def upload_library_image(
+        image: UploadFile = File(...),
+        sku: str | None = Form(None),
+        product_name: str | None = Form(None),
+        size: str | None = Form(None),
+        price: str | None = Form(None),
+        room: str | None = Form(None),
+        style: str | None = Form(None),
+        color: str | None = Form(None),
+        stock: str | None = Form(None),
+        selling_point: str | None = Form(None),
+        repository: ImageRepository = Depends(get_repository),
+    ) -> LibraryImportResponse:
+        """校验并导入单张图库图片，重复内容可增量补充非空商品字段。"""
+        try:
+            data = await image.read(MAX_UPLOAD_BYTES + 1)
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=400, detail="上传图片不能超过 20 MiB。")
+            parsed_price = _optional_price(price)
+            validated = validate_image_bytes(data, image.filename or "uploaded.png")
+            validated.image.close()
+            metadata = ImageMetadata(
+                sku=_optional_text(sku),
+                product_name=_optional_text(product_name),
+                size=_optional_text(size),
+                price=parsed_price,
+                room=_optional_text(room),
+                style=_optional_text(style),
+                color=_optional_text(color),
+                stock=_optional_text(stock),
+                selling_point=_optional_text(selling_point),
+            )
+            service = LibraryService(
+                repository=repository,
+                encoder=application_encoder,
+                image_dir=application_settings.image_dir,
+                project_root=application_settings.project_root,
+            )
+            result = service.import_bytes(data, image.filename or "uploaded.png", metadata)
+            if result.status is ImportStatus.FAILED or result.image_id is None:
+                raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。")
+            row = next((item for item in repository.list_library() if item.image_id == result.image_id), None)
+            if row is None:
+                raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。")
+        except (InvalidImageError, ValueError) as error:
+            raise HTTPException(status_code=400, detail="图片或商品信息无效，请检查后重试。") from error
+        except SQLAlchemyError as error:
+            raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
+        finally:
+            await image.close()
+
+        status_by_result = {
+            ImportStatus.IMPORTED: "imported",
+            ImportStatus.DUPLICATE: "duplicate",
+            ImportStatus.EMBEDDING_ADDED: "embedding_added",
+        }
+        return LibraryImportResponse(
+            status=status_by_result[result.status],
+            message=result.message,
+            image=_library_image_response(row),
         )
 
     @app.get("/api/images/{image_id}")
@@ -263,11 +400,33 @@ def create_app(
                 original_name=row.original_name,
                 image_url=f"/api/images/{row.image_id}",
                 similarity=row.similarity_percent,
+                **_metadata_response(row),
             )
             for rank, row in enumerate(rows, start=1)
         ]
         message = None if results else "当前模型没有可用的向量结果。"
         return SearchResponse(model=_model_response(identity), results=results, message=message)
+
+    @app.get("/", include_in_schema=False)
+    def frontend_index() -> FileResponse:
+        """仅公开固定前端入口，不挂载整个项目目录。"""
+        return FileResponse(application_frontend_root / "index.html", media_type="text/html")
+
+    @app.get("/styles.css", include_in_schema=False)
+    def frontend_styles() -> FileResponse:
+        return FileResponse(application_frontend_root / "styles.css", media_type="text/css")
+
+    @app.get("/matcher-core.js", include_in_schema=False)
+    def frontend_matcher_core() -> FileResponse:
+        return FileResponse(application_frontend_root / "matcher-core.js", media_type="text/javascript")
+
+    @app.get("/api-client.js", include_in_schema=False)
+    def frontend_api_client() -> FileResponse:
+        return FileResponse(application_frontend_root / "api-client.js", media_type="text/javascript")
+
+    @app.get("/app.js", include_in_schema=False)
+    def frontend_app() -> FileResponse:
+        return FileResponse(application_frontend_root / "app.js", media_type="text/javascript")
 
     return app
 

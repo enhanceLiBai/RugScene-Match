@@ -1,83 +1,69 @@
 # 地毯买家秀智能匹配助手
 
-## 后端技术验证
+这是一个由 FastAPI 同源托管页面、PostgreSQL/pgvector 图库和 OpenCLIP 图片向量检索组成的买家秀匹配工具。正式使用时始终通过后端服务打开页面；不要直接双击 `index.html`。
 
-本仓库在原静态 MVP 外，提供图片建库与相似检索后端：默认 OpenCLIP 编码器、PostgreSQL 与 pgvector。当前仅按图片向量相似度检索，不要求 SKU、价格或库存等结构化元数据；现有静态前端尚未接入 API。
-
-### Windows 初始化
+## Windows 初始化
 
 前置条件：Python 3.12，以及 Docker 中可访问的 PostgreSQL 16 和 pgvector；数据库用户应可创建 `carpet_matcher` 数据库并启用 `vector` 扩展。
 
 ```powershell
 scripts\bootstrap.ps1
+Copy-Item .env.example .env
 ```
 
-脚本只创建项目内 `.venv`。所有依赖与模型缓存均保留在项目 `.cache`：Pip 为 `.cache\pip`，PyTorch 为 `.cache\torch`，Hugging Face 为 `.cache\huggingface`，OpenCLIP 权重为 `.cache\open_clip`。
+仅在本机 `.env` 中填写 PostgreSQL 配置，不要提交该文件，也不要在日志或截图中记录密码或完整数据库 URL。`scripts\bootstrap.ps1` 会创建或复用项目内 `.venv`、升级 pip，并安装 `requirements.in` 中的依赖；依赖和模型缓存保留在项目 `.cache` 中。
 
-### 本机配置与数据库
+如果 OpenCLIP 权重已经保存在其他项目或共享目录，可在 `.env` 中设置 `CLIP_CACHE_DIR` 指向现有的 OpenCLIP 缓存目录，避免重复下载。相对路径按当前项目根目录解析；未配置时仍使用 `.cache\open_clip`。
 
-复制示例后，仅在本机 `.env` 填写 PostgreSQL 密码：
+## 正式启动方式
+
+在项目根目录依次执行：
 
 ```powershell
-Copy-Item .env.example .env
+$env:PYTHONIOENCODING = 'utf-8'
 .venv\Scripts\python.exe -m backend.cli init-db
+.venv\Scripts\python.exe -m backend.cli serve
 ```
 
-可配置字段为 `POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`IMAGE_ENCODER`、`CLIP_MODEL_NAME`、`CLIP_PRETRAINED` 和 `MODEL_DEVICE`。请勿提交 `.env`，也不要在文档、日志或截图中写入真实密码或完整数据库 URL。重复运行 `init-db` 是安全的。
+然后访问 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)。该页面、样式和脚本均由同一后端服务提供，并通过 API 读取图库、上传买家秀和执行检索。
 
-首次图片导入或查询时才会下载并加载 OpenCLIP；CPU 上首次加载可能较慢，权重会复用项目内 `.cache\open_clip`。
+重复运行 `init-db` 是安全的。首次实际导入图片或执行查询时才会加载 OpenCLIP；CPU 上首次加载可能较慢，已下载权重会复用项目 `.cache\open_clip` 中的缓存。
 
-### 建库、检索与 API
+## 录入与检索
 
-支持 `.jpg`、`.jpeg`、`.png` 和 `.webp`，可导入单图或递归目录：
+页面支持 `.jpg`、`.jpeg`、`.png` 和 `.webp` 图片。
+
+1. 在“录入买家秀”中选择图片后上传，可选填写 SKU、商品名称、规格、参考价、空间、风格、颜色、库存和卖点。
+2. 在“开始匹配”中上传客户家居图，页面显示按 OpenCLIP 图片向量相似度排序的结果。
+
+这些商品元数据全部选填，只用于展示和运营补充，**不会影响向量相似度排序**。图库原图以 SHA-256 文件名保存在 `data\images`，图片与元数据/向量记录分别存放在 `data\images` 和 PostgreSQL；查询图片只在内存中处理，不会写入图库或数据库。
+
+也可通过命令行批量建库或查询：
 
 ```powershell
 .venv\Scripts\python.exe -m backend.cli import .\samples\library
 .venv\Scripts\python.exe -m backend.cli search .\samples\query\carpet-a-new-angle.jpg --top-k 5
-.venv\Scripts\python.exe -m backend.cli serve
 ```
 
-图库原图以 SHA-256 命名存至 `data\images`；查询图只在内存中处理，不写入图库或数据库。HTTP 服务默认在 `http://127.0.0.1:8000`，提供：
+服务提供 `GET /health`、`GET /api/library`、`GET /api/images/{image_id}`、`POST /api/library` 和 `POST /api/search?top_k=5`。人工验收时建议导入同一地毯的多个角度和至少一个不同地毯，再用一张未入库的同款角度查询，确认同款结果排在前列。
 
-- `GET /health`：数据库状态与当前配置模型。
-- `GET /api/library`：图库图片及模型信息。
-- `GET /api/images/{image_id}`：图库图片文件。
-- `POST /api/search?top_k=5`：上传查询图并返回相似结果（`top_k` 为 1–50）。
+## Excel 图片导入
 
-人工验收时，将同一地毯的两到三张不同角度图片和至少一张其他地毯图片置于导入目录；保留一张未入库的同款不同角度图片作为查询图。导入后查询，预期同款其他角度排在对照图片之前。
+后端支持腾讯工作簿 XLSX 图片解析、商品主图与买家秀关联及后台导入进度记录。通过 `POST /api/imports` 上传工作簿（multipart 字段 `workbook`），再用 `GET /api/imports/{job_id}` 查询进度和汇总；可在 `/docs` 中调用。当前页面尚无 Excel 导入入口。
 
-### 验证命令
+## 验证
 
 以下命令按当前修改范围选择使用，不作为每次开发或合并前的必跑清单。日常开发只运行能证明目标功能可用的最小相关测试，不主动执行完整回归；全量测试和真实 OpenCLIP 冒烟测试仅在用户明确要求时运行。
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests -m "not model" -q
-.venv\Scripts\python.exe -m pip check
-.venv\Scripts\python.exe -m backend.cli --help
-$env:RUN_MODEL_TESTS = '1'
-.venv\Scripts\python.exe -m pytest tests\test_open_clip_smoke.py -v
+node --check api-client.js
+node --check matcher-core.js
+node --check app.js
+$env:PYTHONIOENCODING='utf-8'; .venv\Scripts\python.exe -m pip check
+node --test tests\api-client.test.js tests\matcher-core.test.js tests\app.test.js
+$env:PYTHONIOENCODING='utf-8'; .venv\Scripts\python.exe -m pytest tests -m "not model" -q
 ```
 
+以上三份 Node 内置测试当前共 15 项（原有完整集为 12 项；本轮增加 3 项前端回归）。
 
-这是一个不依赖后端服务即可演示业务流程的第一版：录入买家秀图片后，客服上传客户家居图即可得到视觉上相近的实拍案例。SKU、商品名称、规格等结构化信息均为选填，可以在获得可靠元数据后逐步补充。
-
-## 启动
-
-直接双击 `index.html`，或用任意静态文件服务器打开该目录。数据存放在浏览器的 IndexedDB 中，不会上传到外部服务。
-
-## 当前匹配逻辑
-
-首版只以本地图像的色调、九宫格构图和宽高比为基础进行相似度排序，不使用空间、风格、预算、库存等结构化元数据影响分数。它可验证录入—匹配—话术—反馈的业务流程，但**不能替代语义级图像检索**；演示数据仅供检查流程，不可作为真实推荐依据。
-
-## 上线前迭代建议
-
-1. 将图片存入对象存储，商品和标签迁移到 PostgreSQL。
-2. 用多模态图像向量模型替换 `makeFeature()`，并在 pgvector/Qdrant 中检索 Top 50。
-3. 引入库存、可售规格、价格、人工审核等商品规则后重排。
-4. 将反馈写入后台，定期检查低分匹配并补充标签。
-
-## 建议的真实数据字段
-
-- 图片 ID、原图地址、缩略图地址、SKU、商品名称、颜色、规格、价格、库存状态
-- 空间类型、风格、户型/面积、地板颜色、主色、买家评价、成交话术
-- 审核状态、创建时间、来源、运营补充备注
+真实模型烟测需要可用的已缓存权重或网络访问；日常自动化测试默认使用 fake encoder，因此不触发模型下载。

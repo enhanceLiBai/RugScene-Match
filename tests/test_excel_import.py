@@ -91,7 +91,7 @@ class ImportEncoder:
 
 
 def import_settings(tmp_path):
-    return Settings(tmp_path, "localhost", 5432, "test", "test", "unused", "fake", "test", "v1", "cpu")
+    return Settings(tmp_path, "localhost", 5432, "test", "test", "unused", "fake", "test", "v1", "cpu", tmp_path / ".cache" / "open_clip")
 
 
 def image_bytes(color):
