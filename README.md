@@ -1,5 +1,11 @@
 # 地毯买家秀智能匹配助手
 
+## 场景属性检索
+
+本机 `.env` 配置 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL`。新导入的买家秀自动识别沙发颜色、地板颜色和材质观感；旧图库在“买家秀图库”点击“补充已有买家秀场景标签”，成功标签按模型和规则版本复用，失败项可重新补充。图片、商品关联和已有向量保持保留。
+
+客户查询图在内存中识别，结果展示客户标签与买家秀标签。综合评分权重为沙发颜色 35%、地板颜色 25%、材质观感 20%、CLIP 相似度 20%，按商品去重前对全部有效场景评分。未知属性以图片相似度补充该项；云端失败时明确提示并回退到图片检索。分数是搭配参考分，不是正确率。识别图片会发给配置的云端服务。
+
 这是一个由 FastAPI 同源托管页面、PostgreSQL/pgvector 图库和 OpenCLIP 图片向量检索组成的买家秀匹配工具。正式使用时始终通过后端服务打开页面；不要直接双击 `index.html`。
 
 ## Windows 初始化
@@ -11,7 +17,7 @@ scripts\bootstrap.ps1
 Copy-Item .env.example .env
 ```
 
-仅在本机 `.env` 中填写 PostgreSQL 配置，不要提交该文件，也不要在日志或截图中记录密码或完整数据库 URL。`scripts\bootstrap.ps1` 会创建或复用项目内 `.venv`、升级 pip，并安装 `requirements.in` 中的依赖；依赖和模型缓存保留在项目 `.cache` 中。
+仅在本机 `.env` 中填写 PostgreSQL 配置，不要提交该文件，也不要在日志或截图中记录密码或完整数据库 URL。`scripts\bootstrap.ps1` 会创建或复用项目内 `.ven`、升级 pip，并安装 `requirements.in` 中的依赖；依赖和模型缓存保留在项目 `.cache` 中。
 
 如果 OpenCLIP 权重已经保存在其他项目或共享目录，可在 `.env` 中设置 `CLIP_CACHE_DIR` 指向现有的 OpenCLIP 缓存目录，避免重复下载。相对路径按当前项目根目录解析；未配置时仍使用 `.cache\open_clip`。
 
@@ -21,8 +27,8 @@ Copy-Item .env.example .env
 
 ```powershell
 $env:PYTHONIOENCODING = 'utf-8'
-.venv\Scripts\python.exe -m backend.cli init-db
-.venv\Scripts\python.exe -m backend.cli serve
+.ven\Scripts\python.exe -m backend.cli init-db
+.ven\Scripts\python.exe -m backend.cli serve
 ```
 
 然后访问 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)。该页面、样式和脚本均由同一后端服务提供，并通过 API 读取图库、上传买家秀和执行检索。
@@ -41,8 +47,8 @@ $env:PYTHONIOENCODING = 'utf-8'
 也可通过命令行批量建库或查询：
 
 ```powershell
-.venv\Scripts\python.exe -m backend.cli import .\samples\library
-.venv\Scripts\python.exe -m backend.cli search .\samples\query\carpet-a-new-angle.jpg --top-k 5
+.ven\Scripts\python.exe -m backend.cli import .\samples\library
+.ven\Scripts\python.exe -m backend.cli search .\samples\query\carpet-a-new-angle.jpg --top-k 5
 ```
 
 服务提供 `GET /health`、`GET /api/library`、`GET /api/images/{image_id}`、`POST /api/library` 和 `POST /api/search?top_k=5`。人工验收时建议导入同一地毯的多个角度和至少一个不同地毯，再用一张未入库的同款角度查询，确认同款结果排在前列。
@@ -59,9 +65,9 @@ $env:PYTHONIOENCODING = 'utf-8'
 node --check api-client.js
 node --check matcher-core.js
 node --check app.js
-$env:PYTHONIOENCODING='utf-8'; .venv\Scripts\python.exe -m pip check
+$env:PYTHONIOENCODING='utf-8'; .ven\Scripts\python.exe -m pip check
 node --test tests\api-client.test.js tests\matcher-core.test.js tests\app.test.js
-$env:PYTHONIOENCODING='utf-8'; .venv\Scripts\python.exe -m pytest tests -m "not model" -q
+$env:PYTHONIOENCODING='utf-8'; .ven\Scripts\python.exe -m pytest tests -m "not model" -q
 ```
 
 以上三份 Node 内置测试当前共 15 项（原有完整集为 12 项；本轮增加 3 项前端回归）。

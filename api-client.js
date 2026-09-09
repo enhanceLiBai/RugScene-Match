@@ -57,7 +57,7 @@
       return requestJson(fetcher, '/api/library', { method: 'POST', body });
     }
 
-    async function searchSimilar(file, topK = 5) {
+    async function searchSimilar(file, topK = 10) {
       const body = new FormDataClass();
       body.append('image', file);
       return requestJson(fetcher, `/api/search?top_k=${encodeURIComponent(topK)}`, {
@@ -66,7 +66,28 @@
       });
     }
 
-    return { listLibrary, uploadLibraryImage, searchSimilar };
+    function uploadWorkbook(file, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new root.XMLHttpRequest();
+        xhr.open('POST', '/api/imports');
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
+        };
+        xhr.onerror = () => reject(new ApiError('上传失败，请检查网络后重试。'));
+        xhr.onload = () => {
+          try {
+            const payload = JSON.parse(xhr.responseText);
+            if (xhr.status < 200 || xhr.status >= 300) throw new ApiError(payload.detail || GENERIC_ERROR);
+            resolve(payload);
+          } catch (error) { reject(error); }
+        };
+        const body = new FormDataClass();
+        body.append('workbook', file);
+        xhr.send(body);
+      });
+    }
+    const importStatus = (jobId) => requestJson(fetcher, `/api/imports/${encodeURIComponent(jobId)}`, { method: 'GET' });
+    return { listLibrary, uploadLibraryImage, searchSimilar, uploadWorkbook, importStatus };
   }
 
   return { ApiError, requestJson, create };

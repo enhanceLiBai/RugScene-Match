@@ -33,5 +33,13 @@
     return sentences.join('');
   }
 
-  return { buildPresentation, buildRecommendationScript };
+  function buildApiPresentation(item) {
+    return {
+      productId: String(item.product_id || '未填写'),
+      similarity: `${item.similarity ?? 0}%`,
+      sourceLabel: `买家秀 ${item.matched_source_column || ''} 列`,
+    };
+  }
+
+  return { buildPresentation, buildRecommendationScript, buildApiPresentation };
 });

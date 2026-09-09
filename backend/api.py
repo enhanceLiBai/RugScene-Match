@@ -25,6 +25,7 @@ from backend.excel_import import ExcelImportService, cleanup_import_job
 from backend.image_assets import InvalidImageError, validate_image_bytes
 from backend.repository import ImageMetadata, ImageRepository, LibraryRow, SearchRow
 from backend.services import ImportStatus, LibraryService
+from backend.scene import SceneClient, SceneError, backfill
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -98,12 +99,25 @@ class SearchResultResponse(BaseModel):
     selling_point: str | None = None
 
 
+class ProductSearchResponse(BaseModel):
+    rank: int
+    product_id: str
+    matched_buyer_image_url: str
+    product_image_url: str
+    matched_source_column: str
+    similarity: float
+    scene_labels: dict[str, str] | None = None
+    matched_buyer_download_url: str | None = None
+    product_download_url: str | None = None
+
+
 class SearchResponse(BaseModel):
     """图片检索响应；空结果可附加业务说明。"""
 
     model: ModelResponse
-    results: list[SearchResultResponse]
+    results: list[ProductSearchResponse]
     message: str | None = None
+    query_scene: dict[str, str] | None = None
 
 
 def _model_response(identity: EncoderIdentity) -> ModelResponse:
@@ -190,6 +204,7 @@ def create_app(
     """创建 API 应用；注入项仅用于测试或嵌入式调用，不会提前加载模型。"""
     application_settings = settings or Settings.load()
     application_encoder = encoder or create_encoder(application_settings)
+    scene_client = SceneClient(application_settings.project_root)
     application_frontend_root = frontend_root if frontend_root is not None else Path(__file__).resolve().parent.parent
     owns_session_factory = session_factory is None
     application_session_factory = session_factory or create_session_factory(application_settings)
@@ -206,6 +221,15 @@ def create_app(
                 dispose_session_factory(application_session_factory)
 
     app = FastAPI(title="地毯图片相似检索 API", lifespan=lifespan)
+
+    @app.post('/api/scene-labels/backfill')
+    def label_existing(background_tasks: BackgroundTasks):
+        job_id = uuid4().hex
+        with application_session_factory() as session:
+            ImageRepository(session).create_import_job(job_id,'场景标签补充')
+            session.commit()
+        background_tasks.add_task(backfill,application_settings,application_session_factory,scene_client,job_id)
+        return {'job_id':job_id}
 
     def get_session() -> Iterator[Session]:
         """每个请求独立获取并关闭会话，连接创建失败统一转为服务不可用。"""
@@ -354,7 +378,7 @@ def create_app(
         )
 
     @app.get("/api/images/{image_id}")
-    def image(image_id: int, repository: ImageRepository = Depends(get_repository)) -> FileResponse:
+    def image(image_id: int, download: int = Query(0, ge=0, le=1), repository: ImageRepository = Depends(get_repository)) -> FileResponse:
         """按数据库记录读取图库文件，拒绝越出 data/images 的历史坏路径。"""
         try:
             record = repository.find_by_id(image_id)
@@ -369,7 +393,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="图片存储路径无效。")
         if not stored_path.is_file():
             raise HTTPException(status_code=404, detail="图片不存在。")
-        return FileResponse(stored_path, media_type=record.mime_type, filename=record.original_name)
+        return FileResponse(stored_path, media_type=record.mime_type, filename=record.original_name if download else None, content_disposition_type="attachment" if download else "inline")
 
     @app.post("/api/search", response_model=SearchResponse)
     async def search(
@@ -385,7 +409,19 @@ def create_app(
             validated = validate_image_bytes(data, image.filename or "uploaded.png")
             identity = application_encoder.identity
             query = application_encoder.encode(validated.image)
-            rows = repository.search(identity, query, top_k, excluded_sha256=validated.sha256)
+            warning = None
+            try:
+                scene_labels = scene_client.identify(validated.image)
+            except SceneError:
+                scene_labels = None
+                warning = '场景识别暂不可用，本次仅按图片相似度检索。'
+            if scene_labels and any(scene_labels.get(k) != 'present' for k in ('sofa_status','floor_status')):
+                await image.close()
+                return SearchResponse(model=_model_response(identity), results=[], message='客户照片中的沙发或地板无法确认，无法执行严格场景匹配。', query_scene=scene_labels)
+            if scene_labels and any(scene_labels.get(k) == '无法判断' for k in ('sofa_color','floor_color','floor_material')):
+                await image.close()
+                return SearchResponse(model=_model_response(identity), results=[], message='客户照片的沙发颜色、地板颜色或材质无法确认，无法执行严格场景匹配。', query_scene=scene_labels)
+            rows = repository.search_products(identity, query, top_k=top_k, scene_labels=scene_labels, scene_model=scene_client.model)
         except InvalidImageError as error:
             raise HTTPException(status_code=400, detail="图片无效或格式不受支持。") from error
         except SQLAlchemyError as error:
@@ -394,18 +430,21 @@ def create_app(
             await image.close()
 
         results = [
-            SearchResultResponse(
+            ProductSearchResponse(
                 rank=rank,
-                image_id=row.image_id,
-                original_name=row.original_name,
-                image_url=f"/api/images/{row.image_id}",
+                product_id=row.product_id,
+                matched_buyer_image_url=f"/api/images/{row.buyer_image_id}",
+                product_image_url=f"/api/images/{row.product_image_id}",
+                matched_source_column=row.source_column,
                 similarity=row.similarity_percent,
-                **_metadata_response(row),
+                scene_labels=row.scene_labels,
+                matched_buyer_download_url=f"/api/images/{row.buyer_image_id}?download=1",
+                product_download_url=f"/api/images/{row.product_image_id}?download=1",
             )
             for rank, row in enumerate(rows, start=1)
         ]
-        message = None if results else "当前模型没有可用的向量结果。"
-        return SearchResponse(model=_model_response(identity), results=results, message=message)
+        message = None if results else "暂无关联主图的买家秀，请先在图库导入 Excel。"
+        return SearchResponse(model=_model_response(identity), results=results, message=warning or message, query_scene=scene_labels)
 
     @app.get("/", include_in_schema=False)
     def frontend_index() -> FileResponse:

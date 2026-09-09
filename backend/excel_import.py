@@ -16,6 +16,7 @@ from backend.encoders.base import ImageEncoder
 from backend.image_assets import store_image_bytes, validate_image_bytes
 from backend.repository import ImageRepository
 from backend.tencent_excel import WorkbookImage, WorkbookStructureError, iter_product_images
+from backend.encoders.open_clip import OpenClipInitializationError
 
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,16 @@ class ExcelImportService:
                     repository.upsert_embedding(record, identity, self.encoder.encode(validated.image))
                     encoded = True
             session.commit()
+            if item.role == 'buyer_sofa':
+                from backend.scene import SceneClient, ensure_label, SceneError
+                try:
+                    client = SceneClient(self.settings.project_root)
+                    if client.key:
+                        validated = validated or validate_image_bytes(item.data, item.filename)
+                        ensure_label(session,client,record.id,validated.image)
+                        session.commit()
+                except SceneError:
+                    session.rollback()
             return imported, encoded
         except Exception:
             session.rollback()
@@ -123,6 +134,8 @@ class ExcelImportService:
                     imported, encoded = self._import_image(item)
                 except SQLAlchemyError:
                     raise
+                except OpenClipInitializationError:
+                    raise
                 except Exception:
                     summary["skipped"] += 1
                     summary["errors"].append({
@@ -136,7 +149,12 @@ class ExcelImportService:
                 progress("importing")
             progress("completed")
         except Exception as error:
-            message = "工作簿无效或结构不受支持。" if isinstance(error, WorkbookStructureError) else "导入失败，服务暂不可用，请稍后重试。"
+            if isinstance(error, WorkbookStructureError):
+                message = "工作簿无效或结构不受支持。"
+            elif isinstance(error, OpenClipInitializationError):
+                message = "图片模型初始化失败，请检查 PyTorch 运行环境后重试。"
+            else:
+                message = "导入失败，服务暂不可用，请稍后重试。"
             try:
                 progress("failed", message)
             except SQLAlchemyError:

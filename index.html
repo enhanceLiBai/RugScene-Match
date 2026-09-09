@@ -44,6 +44,7 @@
             <button id="matchButton" class="primary">开始匹配</button>
           </div>
           <p class="hint" id="matchHint" aria-live="polite">先上传客户图；图库为空时请先录入真实买家秀。</p>
+          <p id="queryScene" aria-live="polite"></p>
         </div>
         <section id="results" class="results" hidden>
           <div class="result-title"><div><p class="section-label">02 / 推荐结果</p><h3>最接近的真实买家秀</h3></div><span id="resultCount"></span></div>
@@ -52,8 +53,20 @@
       </section>
 
       <section id="library" class="view">
+        <form id="excelForm" class="panel">
+          <h3>用 Excel 更新买家秀库</h3>
+          <button id="labelExisting" type="button">补充已有买家秀场景标签</button>
+          <p id="labelStatus" aria-live="polite"></p>
+          <p>上传“产品参数&amp;价格.xlsx”，自动绑定同一行的商品 ID、商品主图和买家秀。重复导入会复用已有图片。</p>
+          <input id="excelFile" type="file" accept=".xlsx" required />
+          <button id="excelButton" class="primary" type="submit">导入 Excel</button>
+          <button id="excelResume" type="button" hidden>继续查询进度</button>
+          <progress id="excelProgress" max="100" value="0" hidden></progress>
+          <p id="excelStatus" aria-live="polite"></p>
+          <div id="excelSummary"></div>
+        </form>
         <div class="two-col">
-          <form id="entryForm" class="panel entry-form">
+          <form id="entryForm" class="panel entry-form" hidden>
             <p class="section-label">新增买家秀</p><h3>为图片补全可用的商品信息</h3>
             <label class="mini-dropzone" for="entryImage"><input id="entryImage" type="file" accept="image/*" required /><span id="entryImageText">＋ 选择买家秀图片</span><img id="entryPreview" alt="买家秀预览" hidden /></label>
             <div class="form-grid">
@@ -82,7 +95,7 @@
       </section>
     </main>
 
-    <template id="resultTemplate"><article class="result-card"><img class="result-image" alt="相似买家秀" style="object-fit: contain" /><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div><div class="feedback"><span>这条推荐是否合适？</span><button data-feedback="helpful">合适</button><button data-feedback="not_helpful">不合适</button></div></div></article></template>
+    <template id="resultTemplate"><article class="result-card"><div class="result-images"><figure><img class="buyer-image" alt="相似买家秀" /><figcaption>相似买家秀 <a class="download-link buyer-download" download>下载</a></figcaption></figure><figure><img class="product-image" alt="商品主图" /><figcaption>商品主图 <a class="download-link product-download" download>下载</a></figcaption></figure></div><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div><div class="feedback"><span>这条推荐是否合适？</span><button data-feedback="helpful">合适</button><button data-feedback="not_helpful">不合适</button></div></div></article></template>
     <script src="matcher-core.js"></script>
     <script src="api-client.js"></script>
     <script src="app.js"></script>

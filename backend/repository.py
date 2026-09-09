@@ -11,7 +11,7 @@ from typing import Final
 import numpy as np
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from backend.encoders.base import EncoderIdentity
 from backend.models import ImageEmbedding, ImageRecord, ImportJob, ProductImage
@@ -58,6 +58,16 @@ class SearchRow:
     color: str | None = None
     stock: str | None = None
     selling_point: str | None = None
+
+
+@dataclass(frozen=True)
+class ProductSearchRow:
+    product_id: str
+    buyer_image_id: int
+    product_image_id: int
+    source_column: str
+    similarity_percent: float
+    scene_labels: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -373,6 +383,47 @@ class ImageRepository:
         self._session.flush()
         # Core UPSERT 不会自动同步已加载的 ORM 行，统一过期以保证后续读取不会使用旧向量。
         self._session.expire_all()
+
+    def search_products(self, identity: EncoderIdentity, query: np.ndarray, *, top_k: int = 5, scene_labels=None, scene_model=None) -> list[ProductSearchRow]:
+        """召回场景候选，按商品保留最高分买家秀和当前主图。"""
+        buyer = aliased(ProductImage)
+        main = aliased(ProductImage)
+        distance = ImageEmbedding.embedding.cosine_distance(_validated_vector(identity, query))
+        statement = (
+            select(buyer.product_id, buyer.image_id, main.image_id, buyer.source_column, distance)
+            .join(ImageEmbedding, ImageEmbedding.image_id == buyer.image_id)
+            .join(main, main.product_id == buyer.product_id)
+            .where(buyer.image_role == "buyer_sofa", buyer.is_active.is_(True),
+                   main.image_role == "product_main", main.is_active.is_(True),
+                   ImageEmbedding.encoder == identity.encoder,
+                   ImageEmbedding.model_name == identity.model_name,
+                   ImageEmbedding.pretrained == identity.pretrained,
+                   ImageEmbedding.dimension == identity.dimension)
+            .order_by(distance, buyer.image_id, buyer.product_id)
+        )
+        import json
+        from backend.models import SceneLabel
+        from backend.scene import VERSION, score_scene
+        labels = {x.image_id: json.loads(x.labels_json) for x in self._session.scalars(select(SceneLabel).where(SceneLabel.model == scene_model, SceneLabel.version == VERSION))}
+        candidates = []
+        for product_id, buyer_id, main_id, column, distance_value in self._session.execute(statement):
+            visual = cosine_distance_to_percent(float(distance_value))
+            tags = labels.get(buyer_id)
+            score = score_scene(scene_labels, tags, visual)[0] if scene_labels else visual
+            if scene_labels and score < 0:
+                continue
+            candidates.append(ProductSearchRow(product_id,buyer_id,main_id,column,score,tags))
+        candidates.sort(key=lambda row: (-row.similarity_percent,row.buyer_image_id,row.product_id))
+        seen: set[str] = set()
+        results = []
+        for row in candidates:
+            if row.product_id in seen:
+                continue
+            seen.add(row.product_id)
+            results.append(row)
+            if len(results) >= top_k:
+                break
+        return results
 
     def search(
         self,

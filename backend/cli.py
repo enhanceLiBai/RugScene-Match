@@ -43,7 +43,7 @@ def create_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("path", type=Path, help="查询图片文件")
     search_parser.add_argument("--top-k", type=int, default=5, help="返回数量，范围为 1 到 50（默认：5）")
     serve_parser = commands.add_parser("serve", help="启动 HTTP 服务")
-    serve_parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认：127.0.0.1）")
+    serve_parser.add_argument("--host", default="0.0.0.0", help="监听地址（默认：0.0.0.0，允许局域网访问）")
     serve_parser.add_argument("--port", type=int, default=8000, help="监听端口（默认：8000）")
     return parser
 

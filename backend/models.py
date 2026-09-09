@@ -98,6 +98,15 @@ class ProductImage(Base):
     image: Mapped[ImageRecord] = relationship(back_populates="product_images")
 
 
+class SceneLabel(Base):
+    __tablename__ = "scene_labels"
+    image_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("images.id"), primary_key=True)
+    model: Mapped[str] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(Text)
+    labels_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class ImportJob(Base):
     """保存 Excel 导入的进度、结果汇总与错误信息。"""
 

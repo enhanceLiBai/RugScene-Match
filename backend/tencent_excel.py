@@ -52,9 +52,12 @@ def _iter_archive_images(archive: ZipFile) -> Iterator[WorkbookImage]:
     product_ids = _resolve_product_ids(archive, entries, raw_product_ids)
 
     worksheet_relationships_path = _rels_path(worksheet_path)
-    drawing_relationships = _relationship_map(archive, worksheet_relationships_path)
+    worksheet_relationships = _relationship_map(archive, worksheet_relationships_path) if worksheet_relationships_path in entries else {}
+    if drawing_relationship_id is None and "xl/cellimages.xml" in entries:
+        yield from _iter_cellimages(archive, worksheet_path, product_ids, entries)
+        return
     drawing_path = _resolve_relationship_path(
-        worksheet_path, drawing_relationships[drawing_relationship_id], entries
+        worksheet_path, worksheet_relationships[drawing_relationship_id], entries
     )
     drawing_relationships = _relationship_map(archive, _rels_path(drawing_path))
 
@@ -76,6 +79,58 @@ def _iter_archive_images(archive: ZipFile) -> Iterator[WorkbookImage]:
             filename=PurePosixPath(media_path).name,
             data=data,
         )
+
+
+def _iter_cellimages(
+    archive: ZipFile, worksheet_path: str, product_ids: dict[int, str], entries: set[str]
+) -> Iterator[WorkbookImage]:
+    """解析腾讯导出的 DISPIMG 单元格图片映射。"""
+    formulas: list[tuple[int, int, str]] = []
+    for cell in _iterparse(archive, worksheet_path):
+        if _local_name(cell.tag) != "c":
+            continue
+        match = CELL_REFERENCE.match(cell.get("r", ""))
+        formula = _first_descendant(cell, "f")
+        if match is None or formula is None:
+            cell.clear()
+            continue
+        image_key = re.search(r'DISPIMG\(\s*"([^"]+)"', formula.text or "", re.I)
+        if image_key is None:
+            cell.clear()
+            continue
+        column = _column_number(match.group(1))
+        if _image_column(column) is not None:
+            formulas.append((int(match.group(2)), column, image_key.group(1)))
+        cell.clear()
+    rels_path = "xl/_rels/cellimages.xml.rels"
+    image_rels = _relationship_map(archive, rels_path)
+    names: dict[str, str] = {}
+    for item in _iterparse(archive, "xl/cellimages.xml"):
+        if _local_name(item.tag) != "cellImage":
+            continue
+        name = _first_descendant(item, "cNvPr")
+        blip = _first_descendant(item, "blip")
+        if name is not None and blip is not None:
+            rid = blip.get(f"{OFFICE_RELATIONSHIP}embed")
+            if rid in image_rels:
+                names[name.get("name", "")] = image_rels[rid]
+        item.clear()
+    for row, column, key in formulas:
+        info = _image_column(column)
+        target = names.get(key)
+        product_id = product_ids.get(row)
+        if info is None or target is None or product_id is None:
+            continue
+        media_path = _resolve_relationship_path("xl/cellimages.xml", target, entries)
+        role, source_column = info
+        yield WorkbookImage(product_id, role, source_column, PurePosixPath(media_path).name, archive.read(media_path))
+
+
+def _column_number(value: str) -> int:
+    number = 0
+    for char in value.upper():
+        number = number * 26 + ord(char) - 64
+    return number - 1
 
 
 def _iterparse(archive: ZipFile, path: str) -> Iterator[ElementTree.Element]:
@@ -135,7 +190,7 @@ def _shared_strings(archive: ZipFile, entries: set[str], wanted_indexes: set[int
     return strings
 
 
-def _worksheet_details(archive: ZipFile, path: str) -> tuple[dict[int, str | int], str]:
+def _worksheet_details(archive: ZipFile, path: str) -> tuple[dict[int, str | int], str | None]:
     product_ids: dict[int, str | int] = {}
     drawing_relationship_id: str | None = None
     for element in _iterparse(archive, path):
@@ -150,7 +205,7 @@ def _worksheet_details(archive: ZipFile, path: str) -> tuple[dict[int, str | int
             continue
         if name == "row":
             element.clear()
-    if drawing_relationship_id is None:
+    if drawing_relationship_id is None and "xl/cellimages.xml" not in set(archive.namelist()):
         raise WorkbookStructureError("工作簿结构错误")
     return product_ids, drawing_relationship_id
 

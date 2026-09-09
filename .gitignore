@@ -1,4 +1,7 @@
 .venv/
+.ven/
+.publish-repo/
+*.xlsx
 .cache/
 .env
 data/images/

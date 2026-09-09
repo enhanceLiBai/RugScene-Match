@@ -71,6 +71,8 @@ function renderLibrary(images) {
 }
 
 function renderResults(payload) {
+  const labelText = (tags) => tags ? `空间：${tags.room} · 沙发：${tags.sofa_status === 'present' ? tags.sofa_color : tags.sofa_status} · 地板：${tags.floor_status === 'present' ? `${tags.floor_color} / ${tags.floor_material}` : tags.floor_status}` : '尚无场景标签';
+  $('#queryScene').textContent = `客户场景识别：${labelText(payload.query_scene)}`;
   const matches = payload.results || [];
   const grid = $('#resultGrid');
   grid.replaceChildren();
@@ -83,23 +85,38 @@ function renderResults(payload) {
 
   matches.forEach((item) => {
     const fragment = $('#resultTemplate').content.cloneNode(true);
-    const view = CarpetMatcherCore.buildPresentation(item);
+    const view = CarpetMatcherCore.buildApiPresentation(item);
     const card = fragment.querySelector('.result-card');
     const chips = fragment.querySelector('.chips');
 
-    fragment.querySelector('img').src = item.image_url;
-    fragment.querySelector('.score').textContent = `匹配度 ${item.similarity}%`;
-    fragment.querySelector('.match-reason').textContent = view.matchReason;
-    fragment.querySelector('h4').textContent = view.productName;
-    fragment.querySelector('.sku-line').textContent = `SKU：${view.sku}`;
-    view.chips.forEach((value) => {
+    const images = fragment.querySelector('.result-images');
+    if (images) {
+      images.querySelector('.buyer-image').src = item.matched_buyer_image_url;
+      images.querySelector('.product-image').src = item.product_image_url;
+      images.querySelector('.buyer-download').href = item.matched_buyer_download_url || item.matched_buyer_image_url;
+      images.querySelector('.product-download').href = item.product_download_url || item.product_image_url;
+      images.querySelectorAll('img').forEach((image) => {
+        image.onerror = () => { image.hidden = true; image.parentElement.querySelector('figcaption').textContent = `${image.alt}暂不可用`; };
+      });
+    } else fragment.querySelector('img').src = item.matched_buyer_image_url;
+    fragment.querySelector('.score').textContent = `搭配参考分 ${item.similarity}`;
+    fragment.querySelector('.match-reason').textContent = view.sourceLabel;
+    fragment.querySelector('h4').textContent = `商品 ID：${view.productId}`;
+    const copyId = document.createElement('button');
+    copyId.textContent = '复制商品 ID';
+    copyId.onclick = async () => {
+      try { await navigator.clipboard.writeText(view.productId); copyId.textContent = '已复制'; }
+      catch { copyId.textContent = '复制失败，请手动复制上方 ID'; }
+    };
+    fragment.querySelector('.sku-line').replaceChildren(copyId);
+    (view.chips || []).forEach((value) => {
       const chip = document.createElement('span');
       chip.textContent = value;
       chips.append(chip);
     });
-    fragment.querySelector('.product-info').textContent = view.productInfo;
+    fragment.querySelector('.product-info').textContent = `买家秀场景：${labelText(item.scene_labels)}`;
 
-    const words = CarpetMatcherCore.buildRecommendationScript(item);
+    const words = `商品 ID：${view.productId}，这张买家秀与客户家居图相似，可作为搭配参考。`;
     fragment.querySelector('blockquote').textContent = words;
     fragment.querySelector('.copy-button').onclick = async (event) => {
       await navigator.clipboard.writeText(words);
@@ -118,7 +135,7 @@ function renderResults(payload) {
 
   $('#resultCount').textContent = `展示 Top ${matches.length}`;
   $('#results').hidden = false;
-  $('#matchHint').textContent = '结果按 OpenCLIP 图片向量相似度排序。';
+  $('#matchHint').textContent = payload.message || '按场景属性与图片相似度综合排序；缺失标签的属性使用图片相似度作为参考。';
 }
 
 function readEntryMetadata() {
@@ -182,6 +199,23 @@ function setEntryFormBusy(form, busy) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  $('#labelExisting').onclick = async () => {
+    const button = $('#labelExisting'); button.disabled = true;
+    const output = $('#labelStatus'); output.textContent = '正在补充场景标签…';
+    try {
+      const response = await fetch('/api/scene-labels/backfill', {method:'POST'});
+      if (!response.ok) throw new Error();
+      const {job_id} = await response.json();
+      let state;
+      do {
+        state = await api.importStatus(job_id);
+        output.textContent = `已处理 ${state.processed}/${state.total}，失败 ${state.summary?.skipped || 0}`;
+        if (!['completed','failed'].includes(state.status)) await new Promise(resolve=>setTimeout(resolve,1000));
+      } while (!['completed','failed'].includes(state.status));
+      output.textContent += state.status === 'completed' ? '，处理结束。可再次补充失败项。' : '，任务失败。';
+    } catch { output.textContent = '无法查询补标任务，请稍后重试。'; }
+    finally { button.disabled = false; }
+  };
   refreshLibrary();
 
   document.querySelectorAll('.tab').forEach((button) => {
@@ -217,7 +251,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#results').hidden = true;
     $('#matchHint').textContent = '正在计算 OpenCLIP 图片向量相似度…';
     try {
-      renderResults(await api.searchSimilar(requestedFile, 5));
+      renderResults(await api.searchSimilar(requestedFile, 10));
     } catch (error) {
       $('#results').hidden = true;
       $('#matchHint').textContent = error.message || '匹配失败，请稍后重试。';
@@ -252,5 +286,56 @@ document.addEventListener('DOMContentLoaded', () => {
       setBusy(button, false, '保存中…');
       setEntryFormBusy(form, false);
     }
+  };
+
+  let importJobId = sessionStorage.getItem('importJobId');
+  let polling = false;
+  const importBusy = (busy) => {
+    $('#excelButton').disabled = busy;
+    $('#excelFile').disabled = busy;
+    $('#excelResume').hidden = busy || !importJobId;
+  };
+  async function pollImport() {
+    if (polling || !importJobId) return;
+    polling = true;
+    importBusy(true);
+    try {
+      let status;
+      do {
+        status = await api.importStatus(importJobId);
+        const stages = { parsing: '解析工作簿', importing: '提取图片并建立检索索引', completed: '导入完成', failed: '导入失败' };
+        $('#excelStatus').textContent = `${stages[status.status] || '处理中'}，已处理 ${status.processed} 张图片`;
+        const summary = status.summary || {};
+        $('#excelSummary').textContent = `新增 ${summary.imported || 0} 张，复用 ${summary.reused || 0} 张，跳过 ${summary.skipped || 0} 张。`;
+        (summary.errors || []).forEach((error) => {
+          const line = document.createElement('p');
+          line.textContent = `商品 ${error.product_id}，${error.source_column} 列：${error.message}`;
+          $('#excelSummary').append(line);
+        });
+        if (!['completed', 'failed'].includes(status.status)) await new Promise(resolve => setTimeout(resolve, 1000));
+      } while (!['completed', 'failed'].includes(status.status));
+      $('#excelStatus').textContent = status.error || '导入完成，可以开始匹配。';
+      importJobId = null;
+      sessionStorage.removeItem('importJobId');
+      await refreshLibrary();
+    } catch { $('#excelStatus').textContent = '暂时无法查询进度，可点击“继续查询进度”。'; }
+    finally { polling = false; importBusy(false); }
+  }
+  $('#excelResume').onclick = pollImport;
+  if (importJobId) pollImport();
+  $('#excelForm').onsubmit = async (event) => {
+    event.preventDefault();
+    const file = $('#excelFile').files[0];
+    if (!file) return;
+    importBusy(true);
+    $('#excelProgress').hidden = false;
+    $('#excelStatus').textContent = '正在上传 Excel…';
+    try {
+      const { job_id } = await api.uploadWorkbook(file, (value) => { $('#excelProgress').value = value; });
+      importJobId = job_id;
+      sessionStorage.setItem('importJobId', job_id);
+      await pollImport();
+    } catch (error) { $('#excelStatus').textContent = error.message || '导入失败'; }
+    finally { importBusy(false); }
   };
 });
