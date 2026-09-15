@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from backend.config import Settings
 from backend.encoders.base import ImageEncoder
 from backend.image_assets import store_image_bytes, validate_image_bytes
-from backend.repository import ImageRepository
+from backend.repository import ImageMetadata, ImageRepository
 from backend.tencent_excel import WorkbookImage, WorkbookStructureError, iter_product_images
 from backend.encoders.open_clip import OpenClipInitializationError
 
@@ -63,7 +63,13 @@ class ExcelImportService:
         finally:
             session.close()
 
-    def _import_image(self, item: WorkbookImage) -> tuple[bool, bool]:
+    def import_single(self, data: bytes, filename: str, metadata: ImageMetadata) -> tuple[bool, bool]:
+        """复用 Excel 图片入库、向量和打标流程，不伪造商品关联。"""
+        return self._import_image(WorkbookImage('', 'buyer_sofa', 'L', filename, data),
+                                  metadata=metadata, standalone=True)
+
+    def _import_image(self, item: WorkbookImage, *, metadata: ImageMetadata | None = None,
+                      standalone: bool = False) -> tuple[bool, bool]:
         """返回是否新增、是否编码；任一步失败均回滚当前图片的记录与关联。"""
         session = self.session_factory()
         try:
@@ -80,11 +86,14 @@ class ExcelImportService:
                     width=validated.width, height=validated.height,
                 )
             encoded = False
+            if metadata is not None:
+                repository.update_metadata(record, metadata)
             if item.role == "product_main":
                 # 主图不读取编码器身份，保持模型惰性加载，也不产生搜索向量。
                 repository.set_current_product_main(item.product_id, record, item.source_column)
             else:
-                repository.link_product_image(item.product_id, record, item.role, item.source_column)
+                if not standalone:
+                    repository.link_product_image(item.product_id, record, item.role, item.source_column)
                 identity = self.encoder.identity
                 has_embedding = any(
                     (embedding.encoder, embedding.model_name, embedding.pretrained, embedding.dimension)

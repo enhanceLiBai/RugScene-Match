@@ -8,3 +8,7 @@
 #excelForm { margin-bottom: 20px; }
 #excelProgress { display: block; width: 100%; margin-top: 16px; }
 .two-col:has(#entryForm[hidden]) { grid-template-columns: 1fr; }
+.history-record { display: block; width: 100%; text-align: left; margin: 12px 0; padding: 14px; }
+.history-record img { width: 100px; height: 80px; object-fit: contain; vertical-align: middle; margin-right: 14px; }
+#historyCustomerImage { display: block; width: 100%; max-height: 480px; object-fit: contain; margin-top: 16px; }
+.delete-image-button { color: #a13f2b; margin-left: 10px; }

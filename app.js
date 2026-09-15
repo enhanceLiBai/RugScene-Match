@@ -59,7 +59,8 @@ function renderLibrary(images) {
     const chips = document.createElement('small');
 
     entry.className = 'library-item';
-    image.src = item.image_url;
+    image.loading = 'lazy';
+    image.src = item.image_url + '?preview=1';
     image.alt = view.productName;
     name.textContent = view.productName;
     sku.textContent = `SKU：${view.sku}`;
@@ -71,9 +72,13 @@ function renderLibrary(images) {
 }
 
 function renderResults(payload) {
+  document.querySelectorAll('[data-scene-field]').forEach((select) => {
+    select.value = payload.query_scene?.[select.dataset.sceneField] || '';
+  });
   const labelText = (tags) => tags ? `空间：${tags.room} · 沙发：${tags.sofa_status === 'present' ? tags.sofa_color : tags.sofa_status} · 地板：${tags.floor_status === 'present' ? `${tags.floor_color} / ${tags.floor_material}` : tags.floor_status}` : '尚无场景标签';
   $('#queryScene').textContent = `客户场景识别：${labelText(payload.query_scene)}`;
-  const matches = payload.results || [];
+  const deletedIds = new Set(JSON.parse(sessionStorage.getItem('deletedLibraryImageIds') || '[]'));
+  const matches = (payload.results || []).filter((item) => !deletedIds.has(Number(item.buyer_image_id)));
   const grid = $('#resultGrid');
   grid.replaceChildren();
 
@@ -91,24 +96,61 @@ function renderResults(payload) {
 
     const images = fragment.querySelector('.result-images');
     if (images) {
-      images.querySelector('.buyer-image').src = item.matched_buyer_image_url;
-      images.querySelector('.product-image').src = item.product_image_url;
+      images.querySelector('.buyer-image').src = item.matched_buyer_image_url + '?preview=1';
+      const productImage = images.querySelector('.product-image');
+      if (item.product_image_url) productImage.src = item.product_image_url + '?preview=1';
+      else {
+        productImage.hidden = true;
+        productImage.parentElement.querySelector('figcaption').textContent = '未提供商品主图';
+      }
       images.querySelector('.buyer-download').href = item.matched_buyer_download_url || item.matched_buyer_image_url;
-      images.querySelector('.product-download').href = item.product_download_url || item.product_image_url;
+      const productDownload = images.querySelector('.product-download');
+      if (productDownload) productDownload.href = item.product_download_url || item.product_image_url;
       images.querySelectorAll('img').forEach((image) => {
         image.onerror = () => { image.hidden = true; image.parentElement.querySelector('figcaption').textContent = `${image.alt}暂不可用`; };
       });
     } else fragment.querySelector('img').src = item.matched_buyer_image_url;
-    fragment.querySelector('.score').textContent = `搭配参考分 ${item.similarity}`;
-    fragment.querySelector('.match-reason').textContent = view.sourceLabel;
+    fragment.querySelector('.score').textContent = `图片相似度分 ${item.similarity}`;
+    fragment.querySelector('.match-reason').textContent = item.match_explanation || view.sourceLabel;
     fragment.querySelector('h4').textContent = `商品 ID：${view.productId}`;
     const copyId = document.createElement('button');
     copyId.textContent = '复制商品 ID';
+    copyId.hidden = !item.product_id;
     copyId.onclick = async () => {
       try { await navigator.clipboard.writeText(view.productId); copyId.textContent = '已复制'; }
       catch { copyId.textContent = '复制失败，请手动复制上方 ID'; }
     };
     fragment.querySelector('.sku-line').replaceChildren(copyId);
+    const copyImage = document.createElement('button');
+    copyImage.type = 'button';
+    copyImage.textContent = '复制图片';
+    copyImage.onclick = async () => {
+      try {
+        const response = await fetch(item.matched_buyer_image_url);
+        const blob = await response.blob();
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        copyImage.textContent = '已复制';
+        setTimeout(() => { copyImage.textContent = '复制图片'; }, 1400);
+      } catch { copyImage.textContent = '复制失败'; }
+    };
+    fragment.querySelector('.sku-line').append(copyImage);
+    const deleteButton = fragment.querySelector('.delete-image-button');
+    deleteButton.onclick = async () => {
+      if (!window.confirm('确定从图库删除这张图片吗？历史记录仍会保留，但图片将无法打开。')) return;
+      deleteButton.disabled = true;
+      try {
+        await api.deleteLibraryImage(item.buyer_image_id);
+        const deleted = new Set(JSON.parse(sessionStorage.getItem('deletedLibraryImageIds') || '[]'));
+        deleted.add(Number(item.buyer_image_id));
+        sessionStorage.setItem('deletedLibraryImageIds', JSON.stringify([...deleted]));
+        card.remove();
+        $('#matchHint').textContent = '图片已从图库删除；历史记录仍保留。';
+      } catch (error) {
+        deleteButton.disabled = false;
+        $('#matchHint').textContent = error.message || '删除失败，请稍后重试。';
+      }
+    };
+    deleteButton.hidden = !item.buyer_image_id;
     (view.chips || []).forEach((value) => {
       const chip = document.createElement('span');
       chip.textContent = value;
@@ -116,7 +158,7 @@ function renderResults(payload) {
     });
     fragment.querySelector('.product-info').textContent = `买家秀场景：${labelText(item.scene_labels)}`;
 
-    const words = `商品 ID：${view.productId}，这张买家秀与客户家居图相似，可作为搭配参考。`;
+    const words = `${item.product_id ? `商品 ID：${view.productId}，` : ''}这张买家秀与客户家居图相似，可作为搭配参考。`;
     fragment.querySelector('blockquote').textContent = words;
     fragment.querySelector('.copy-button').onclick = async (event) => {
       await navigator.clipboard.writeText(words);
@@ -135,7 +177,7 @@ function renderResults(payload) {
 
   $('#resultCount').textContent = `展示 Top ${matches.length}`;
   $('#results').hidden = false;
-  $('#matchHint').textContent = payload.message || '按场景属性与图片相似度综合排序；缺失标签的属性使用图片相似度作为参考。';
+  $('#matchHint').textContent = payload.message || '通过场景属性筛选后，按图片相似度排序。';
 }
 
 function readEntryMetadata() {
@@ -199,6 +241,85 @@ function setEntryFormBusy(form, busy) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  let historyCursor = null;
+  const sceneOptions = {
+    room: ['空间', ['客厅','卧室','玄关','餐厅','书房']],
+    sofa_color: ['沙发颜色', ['黑色','白色','米色','浅灰色','深灰色','棕色','浅木色','深木色','蓝色','绿色','红色','黄色']],
+    floor_color: ['地板颜色', ['黑色','白色','米色','浅灰色','深灰色','棕色','浅木色','深木色','蓝色','绿色','红色','黄色']],
+    floor_material: ['地板材质', ['木纹','瓷砖/石材','水泥感']],
+  };
+  for (const [key, [title, values]] of Object.entries(sceneOptions)) {
+    const label = document.createElement('label');
+    label.textContent = title;
+    const select = document.createElement('select');
+    select.dataset.sceneField = key;
+    for (const value of ['', ...values]) {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = value || '待确认';
+      select.append(option);
+    }
+    label.append(select); $('#sceneFields').append(label);
+  }
+  async function historyJson(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('历史记录读取失败，请重试。');
+    return response.json();
+  }
+  async function loadHistory(more = false) {
+    const status = $('#historyStatus');
+    $('#historyRefresh').disabled = $('#historyMore').disabled = true;
+    status.textContent = '正在读取…';
+    try {
+      const data = await historyJson('/api/history' + (more && historyCursor ? `?before=${historyCursor}` : ''));
+      if (!more) $('#historyList').replaceChildren();
+      for (const item of data.items) {
+        const button = document.createElement('button');
+        button.className = 'history-record';
+        const scene = item.query_scene;
+        button.textContent = `${new Date(item.created_at).toLocaleString()} · ${item.result_count} 条结果 · ${scene ? [scene.room,scene.sofa_color,scene.floor_color,scene.floor_material].filter(Boolean).join(' / ') : '未识别场景'} · 查看`;
+        if (item.query_image_url) {
+          const thumbnail = document.createElement('img');
+          thumbnail.src = item.query_image_url;
+          thumbnail.alt = '客户照片';
+          thumbnail.loading = 'lazy';
+          button.prepend(thumbnail);
+        } else {
+          button.append(' · 未保存客户照片');
+        }
+        button.onclick = async () => {
+          button.disabled = true;
+          try {
+            const detail = await historyJson(`/api/history/${item.id}`);
+            document.querySelector('[data-view="match"]').click();
+            queryFile = undefined;
+            $('#useConfirmedScene').checked = false;
+            $('#queryImage').value = '';
+            clearPreview($('#queryPreview'), $('.dropzone-copy'));
+            renderResults(detail.payload);
+            const customerImage = $('#historyCustomerImage');
+            customerImage.hidden = !detail.query_image_url;
+            customerImage.removeAttribute('src');
+            if (detail.query_image_url) customerImage.src = detail.query_image_url;
+            customerImage.onerror = () => {
+              customerImage.hidden = true;
+              $('#historyViewing').textContent += ' 客户照片加载失败，请重新打开记录。';
+            };
+            $('#historyViewing').hidden = false;
+            $('#historyViewing').textContent = `正在查看 ${new Date(detail.created_at).toLocaleString()} 的历史结果${detail.query_image_url ? '，下方为当时的客户照片。' : '（旧记录未保存客户照片）。'}`;
+          } catch (error) { status.textContent = error.message; }
+          finally { button.disabled = false; }
+        };
+        $('#historyList').append(button);
+      }
+      historyCursor = data.next_before;
+      $('#historyMore').hidden = !historyCursor;
+      status.textContent = $('#historyList').children.length ? '' : '暂无记录，完成一次检索后会自动保存。';
+    } catch (error) { status.textContent = error.message; }
+    finally { $('#historyRefresh').disabled = $('#historyMore').disabled = false; }
+  }
+  $('#historyRefresh').onclick = () => loadHistory();
+  $('#historyMore').onclick = () => loadHistory(true);
+  document.querySelector('[data-view="history"]').addEventListener('click', () => loadHistory());
   $('#labelExisting').onclick = async () => {
     const button = $('#labelExisting'); button.disabled = true;
     const output = $('#labelStatus'); output.textContent = '正在补充场景标签…';
@@ -227,6 +348,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   $('#queryImage').onchange = (event) => {
+    $('#useConfirmedScene').checked = false;
+    document.querySelectorAll('[data-scene-field]').forEach((select) => { select.value = ''; });
+    $('#historyCustomerImage').hidden = true;
+    $('#historyViewing').hidden = true;
     queryFile = event.target.files[0];
     preview(event.target, $('#queryPreview'), $('.dropzone-copy'));
   };
@@ -244,14 +369,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const button = $('#matchButton');
+    let confirmed = null;
+    if ($('#useConfirmedScene').checked) {
+      confirmed = {sofa_status: 'present', floor_status: 'present'};
+      document.querySelectorAll('[data-scene-field]').forEach((select) => { confirmed[select.dataset.sceneField] = select.value; });
+      if (Object.keys(sceneOptions).some((key) => !confirmed[key])) {
+        $('#matchHint').textContent = '请先确认全部四项场景属性。';
+        $('#sceneConfirmation').open = true;
+        return;
+      }
+    }
+    $('#historyViewing').hidden = true;
+    $('#historyCustomerImage').hidden = true;
     const input = $('#queryImage');
     const requestedFile = queryFile;
     setBusy(button, true, '匹配中…');
     input.disabled = true;
     $('#results').hidden = true;
-    $('#matchHint').textContent = '正在计算 OpenCLIP 图片向量相似度…';
+    $('#matchHint').textContent = '正在识别场景并检索；高相似度但标签冲突的候选会进行双图复核，请稍候…';
     try {
-      renderResults(await api.searchSimilar(requestedFile, 10));
+      const payload = await api.searchSimilar(requestedFile, Number($('#topK').value), confirmed);
+      renderResults(payload);
+      if (!payload.results?.length) $('#sceneConfirmation').open = true;
     } catch (error) {
       $('#results').hidden = true;
       $('#matchHint').textContent = error.message || '匹配失败，请稍后重试。';
@@ -273,12 +412,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const form = event.target;
     setEntryFormBusy(form, true);
     setBusy(button, true, '保存中…');
-    showEntryStatus('正在上传图片并生成向量…');
+    showEntryStatus('正在上传图片、生成向量并识别场景标签，请稍候…');
     try {
       const response = await api.uploadLibraryImage(file, readEntryMetadata());
       form.reset();
       clearPreview($('#entryPreview'), $('#entryImageText'));
-      showEntryStatus(response.status === 'duplicate' ? '图库已有这张图片，商品信息已补充。' : '图片已保存并加入图库。');
+      const tags = response.scene_labels;
+      showEntryStatus((response.message || '图片已保存并加入图库。') + (tags ? ` 空间：${tags.room}；沙发：${tags.sofa_color}；地板：${tags.floor_color} / ${tags.floor_material}` : ''));
       await refreshLibrary();
     } catch (error) {
       showEntryStatus(error.message || '图片入库失败，请稍后重试。', 'error');

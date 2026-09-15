@@ -16,6 +16,11 @@ from backend.encoders.base import EncoderIdentity
 from backend.tencent_excel import WorkbookImage, WorkbookStructureError
 
 
+@pytest.fixture(autouse=True)
+def disable_cloud_credentials(monkeypatch):
+    monkeypatch.setenv('DEEPSEEK_API_KEY', '')
+
+
 class MemorySession:
     def __init__(self):
         self.state = {"images": {}, "links": {}, "jobs": {}}

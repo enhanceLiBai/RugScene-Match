@@ -27,8 +27,19 @@
       <nav class="tabs" aria-label="功能导航">
         <button class="tab active" data-view="match">智能匹配</button>
         <button class="tab" data-view="library">买家秀图库</button>
+        <button class="tab" data-view="history">历史匹配记录</button>
       </nav>
 
+      <section id="history" class="view">
+        <div class="panel">
+          <h3>历史匹配记录</h3>
+          <p>当前为团队共享记录。保存客户照片、当次场景标签与推荐结果，可打开记录进行对照。旧记录若未保存客户照片，将无法补回。</p>
+          <button id="historyRefresh" type="button">刷新记录</button>
+          <p id="historyStatus" aria-live="polite"></p>
+          <div id="historyList"></div>
+          <button id="historyMore" type="button" hidden>加载更多</button>
+        </div>
+      </section>
       <section id="match" class="view active">
         <div class="panel upload-panel">
           <div class="panel-heading">
@@ -41,10 +52,19 @@
             <div class="dropzone-copy"><span class="plus">＋</span><strong>选择或拖入客户家的照片</strong><small>支持 JPG、PNG、WEBP</small></div>
           </label>
           <div class="filters">
+            <label>结果数量<select id="topK"><option value="5">Top 5</option><option value="10" selected>Top 10</option></select></label>
             <button id="matchButton" class="primary">开始匹配</button>
           </div>
           <p class="hint" id="matchHint" aria-live="polite">先上传客户图；图库为空时请先录入真实买家秀。</p>
           <p id="queryScene" aria-live="polite"></p>
+          <details id="sceneConfirmation">
+            <summary>核对或手动确认客户场景</summary>
+            <p class="hint">请仅确认照片中可见的属性，地板不包含地毯。勾选后按确认值检索，不再调用自动识别。</p>
+            <div class="form-grid" id="sceneFields"></div>
+            <label><input type="checkbox" id="useConfirmedScene">使用我确认的标签</label>
+          </details>
+          <p id="historyViewing" hidden></p>
+          <img id="historyCustomerImage" alt="本次历史匹配的客户照片" hidden>
         </div>
         <section id="results" class="results" hidden>
           <div class="result-title"><div><p class="section-label">02 / 推荐结果</p><h3>最接近的真实买家秀</h3></div><span id="resultCount"></span></div>
@@ -66,8 +86,9 @@
           <div id="excelSummary"></div>
         </form>
         <div class="two-col">
-          <form id="entryForm" class="panel entry-form" hidden>
-            <p class="section-label">新增买家秀</p><h3>为图片补全可用的商品信息</h3>
+          <form id="entryForm" class="panel entry-form">
+            <p class="section-label">新增买家秀</p><h3>单张图片导入</h3>
+            <p class="hint">自动生成图片向量并识别场景标签。无需商品主图或商品 ID 即可参与检索；下方资料均为选填。</p>
             <label class="mini-dropzone" for="entryImage"><input id="entryImage" type="file" accept="image/*" required /><span id="entryImageText">＋ 选择买家秀图片</span><img id="entryPreview" alt="买家秀预览" hidden /></label>
             <div class="form-grid">
               <label>地毯 SKU（选填）<input id="sku" placeholder="例如 CT-208-CRM" /></label>
@@ -95,7 +116,7 @@
       </section>
     </main>
 
-    <template id="resultTemplate"><article class="result-card"><div class="result-images"><figure><img class="buyer-image" alt="相似买家秀" /><figcaption>相似买家秀 <a class="download-link buyer-download" download>下载</a></figcaption></figure><figure><img class="product-image" alt="商品主图" /><figcaption>商品主图 <a class="download-link product-download" download>下载</a></figcaption></figure></div><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div><div class="feedback"><span>这条推荐是否合适？</span><button data-feedback="helpful">合适</button><button data-feedback="not_helpful">不合适</button></div></div></article></template>
+    <template id="resultTemplate"><article class="result-card"><div class="result-images"><figure><img class="buyer-image" alt="相似买家秀" /><figcaption>相似买家秀 <a class="download-link buyer-download" download>下载</a></figcaption></figure><figure><img class="product-image" alt="商品主图" /><figcaption>商品主图 <a class="download-link product-download" download>下载</a></figcaption></figure></div><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><button class="delete-image-button" type="button">从图库删除</button><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div><div class="feedback"><span>这条推荐是否合适？</span><button data-feedback="helpful">合适</button><button data-feedback="not_helpful">不合适</button></div></div></article></template>
     <script src="matcher-core.js"></script>
     <script src="api-client.js"></script>
     <script src="app.js"></script>

@@ -57,13 +57,18 @@
       return requestJson(fetcher, '/api/library', { method: 'POST', body });
     }
 
-    async function searchSimilar(file, topK = 10) {
+    async function searchSimilar(file, topK = 10, confirmedScene = null) {
       const body = new FormDataClass();
       body.append('image', file);
+      if (confirmedScene) body.append('confirmed_scene', JSON.stringify(confirmedScene));
       return requestJson(fetcher, `/api/search?top_k=${encodeURIComponent(topK)}`, {
         method: 'POST',
         body,
       });
+    }
+
+    async function deleteLibraryImage(imageId) {
+      return requestJson(fetcher, `/api/library/${encodeURIComponent(imageId)}`, { method: 'DELETE' });
     }
 
     function uploadWorkbook(file, onProgress) {
@@ -87,7 +92,7 @@
       });
     }
     const importStatus = (jobId) => requestJson(fetcher, `/api/imports/${encodeURIComponent(jobId)}`, { method: 'GET' });
-    return { listLibrary, uploadLibraryImage, searchSimilar, uploadWorkbook, importStatus };
+    return { listLibrary, uploadLibraryImage, searchSimilar, deleteLibraryImage, uploadWorkbook, importStatus };
   }
 
   return { ApiError, requestJson, create };

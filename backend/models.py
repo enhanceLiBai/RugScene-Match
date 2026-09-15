@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from pgvector.sqlalchemy import VECTOR
-from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, DateTime, ForeignKey, Integer, LargeBinary, Numeric, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -105,6 +105,22 @@ class SceneLabel(Base):
     version: Mapped[str] = mapped_column(Text)
     labels_json: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class MatchHistory(Base):
+    """保存当次结果快照；客户图片独立关联，不进入检索图库。"""
+    __tablename__ = "match_history"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MatchHistoryImage(Base):
+    """与结果同事务持久化的客户原图，列表查询不加载图片二进制。"""
+    __tablename__ = "match_history_images"
+    history_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("match_history.id", ondelete="CASCADE"), primary_key=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    mime_type: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ImportJob(Base):

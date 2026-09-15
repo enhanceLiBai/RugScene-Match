@@ -9,7 +9,7 @@ import re
 from typing import Final
 
 import numpy as np
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, or_, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, aliased
 
@@ -62,10 +62,10 @@ class SearchRow:
 
 @dataclass(frozen=True)
 class ProductSearchRow:
-    product_id: str
+    product_id: str | None
     buyer_image_id: int
-    product_image_id: int
-    source_column: str
+    product_image_id: int | None
+    source_column: str | None
     similarity_percent: float
     scene_labels: dict | None = None
 
@@ -384,17 +384,20 @@ class ImageRepository:
         # Core UPSERT 不会自动同步已加载的 ORM 行，统一过期以保证后续读取不会使用旧向量。
         self._session.expire_all()
 
-    def search_products(self, identity: EncoderIdentity, query: np.ndarray, *, top_k: int = 5, scene_labels=None, scene_model=None) -> list[ProductSearchRow]:
+    def search_products(self, identity: EncoderIdentity, query: np.ndarray, *, top_k: int = 5, scene_labels=None, scene_model=None, filter_scene: bool = True) -> list[ProductSearchRow]:
         """召回场景候选，按商品保留最高分买家秀和当前主图。"""
         buyer = aliased(ProductImage)
         main = aliased(ProductImage)
         distance = ImageEmbedding.embedding.cosine_distance(_validated_vector(identity, query))
         statement = (
-            select(buyer.product_id, buyer.image_id, main.image_id, buyer.source_column, distance)
-            .join(ImageEmbedding, ImageEmbedding.image_id == buyer.image_id)
-            .join(main, main.product_id == buyer.product_id)
-            .where(buyer.image_role == "buyer_sofa", buyer.is_active.is_(True),
-                   main.image_role == "product_main", main.is_active.is_(True),
+            select(buyer.product_id, ImageRecord.id, main.image_id, buyer.source_column, distance)
+            .select_from(ImageRecord)
+            .join(ImageEmbedding, ImageEmbedding.image_id == ImageRecord.id)
+            .outerjoin(buyer, and_(buyer.image_id == ImageRecord.id,
+                                  buyer.image_role == "buyer_sofa", buyer.is_active.is_(True)))
+            .outerjoin(main, and_(main.product_id == buyer.product_id,
+                                 main.image_role == "product_main", main.is_active.is_(True)))
+            .where(or_(buyer.id.is_not(None), ~select(ProductImage.id).where(ProductImage.image_id == ImageRecord.id).exists()),
                    ImageEmbedding.encoder == identity.encoder,
                    ImageEmbedding.model_name == identity.model_name,
                    ImageEmbedding.pretrained == identity.pretrained,
@@ -409,17 +412,18 @@ class ImageRepository:
         for product_id, buyer_id, main_id, column, distance_value in self._session.execute(statement):
             visual = cosine_distance_to_percent(float(distance_value))
             tags = labels.get(buyer_id)
-            score = score_scene(scene_labels, tags, visual)[0] if scene_labels else visual
-            if scene_labels and score < 0:
+            score = score_scene(scene_labels, tags, visual)[0] if filter_scene else visual
+            if score < 0:
                 continue
             candidates.append(ProductSearchRow(product_id,buyer_id,main_id,column,score,tags))
-        candidates.sort(key=lambda row: (-row.similarity_percent,row.buyer_image_id,row.product_id))
-        seen: set[str] = set()
+        candidates.sort(key=lambda row: (-row.similarity_percent,row.buyer_image_id,row.product_id or ''))
+        seen: set[tuple[str, str | int]] = set()
         results = []
         for row in candidates:
-            if row.product_id in seen:
+            key = ('product', row.product_id) if row.product_id else ('image', row.buyer_image_id)
+            if key in seen:
                 continue
-            seen.add(row.product_id)
+            seen.add(key)
             results.append(row)
             if len(results) >= top_k:
                 break

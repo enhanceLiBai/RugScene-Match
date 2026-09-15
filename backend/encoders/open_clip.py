@@ -24,6 +24,7 @@ class OpenClipEncoder:
         self._runtime: tuple[Any, Any, Any, str, EncoderIdentity] | None = None
         self._initialization_error: OpenClipInitializationError | None = None
         self._load_lock = Lock()
+        self._encode_lock = Lock()
 
     @property
     def identity(self) -> EncoderIdentity:
@@ -33,7 +34,8 @@ class OpenClipEncoder:
     def encode(self, image: Image.Image) -> np.ndarray:
         """将输入转换为 RGB，并编码为归一化的 float32 单位向量。"""
         model, preprocess, torch, device, _identity = self._ensure_runtime()
-        return self._encode_with_runtime(model, preprocess, torch, device, image.convert("RGB"))
+        with self._encode_lock:
+            return self._encode_with_runtime(model, preprocess, torch, device, image.convert("RGB"))
 
     def _ensure_runtime(self) -> tuple[Any, Any, Any, str, EncoderIdentity]:
         """用双重检查锁保证并发首次访问只会初始化一套模型。"""

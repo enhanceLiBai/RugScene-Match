@@ -43,6 +43,125 @@ class FailingEncoder(FakeEncoder):
         raise RuntimeError("internal encoder failure")
 
 
+def test_match_history_snapshot(client, monkeypatch, api_settings, api_session_factory, fake_encoder, frontend_root):
+    from backend.scene import SceneClient
+    from backend.repository import ProductSearchRow
+
+    tags = dict(room="客厅", sofa_status="present", sofa_color="米白",
+                floor_status="present", floor_color="灰色", floor_material="瓷砖")
+    monkeypatch.setattr(SceneClient, "identify", lambda self, image: tags)
+    monkeypatch.setattr(ImageRepository, "search_products", lambda *args, **kwargs: [
+        ProductSearchRow("history-product", 1, 2, "J", 92.5, tags)
+    ])
+    response = client.post("/api/search", files={"image": ("private-customer.png", png_bytes(), "image/png")})
+    assert response.status_code == 200
+    listing = client.get("/api/history").json()
+    record = listing["items"][0]
+    assert record["result_count"] == 1
+    assert record["query_scene"] == tags
+    detail = client.get(f'/api/history/{record["id"]}')
+    assert detail.json()["payload"] == response.json()
+    assert "private-customer" not in detail.text
+    assert not list(api_settings.image_dir.glob("*"))
+    image_url = detail.json()["query_image_url"]
+    assert record["query_image_url"] == image_url
+    # 新应用实例读取同一数据库，验证照片不依赖请求内存或客户端预览。
+    with TestClient(create_app(settings=api_settings, encoder=fake_encoder,
+                              session_factory=api_session_factory, frontend_root=frontend_root)) as reopened:
+        photo = reopened.get(image_url)
+        assert photo.status_code == 200
+        assert photo.headers["content-type"] == "image/png"
+        assert photo.content == png_bytes()
+        assert reopened.get(f'/api/history/{record["id"]}').json() == detail.json()
+
+    monkeypatch.setattr(SceneClient, "identify", lambda self, image: {**tags, "sofa_status": "unknown"})
+    empty = client.post("/api/search", files={"image": ("private.png", png_bytes(), "image/png")})
+    assert empty.status_code == 200
+    newest = client.get("/api/history").json()["items"][0]
+    assert newest["id"] > record["id"]
+    assert newest["result_count"] == 0
+    assert client.get(newest["query_image_url"]).content == png_bytes()
+    assert client.get(f'/api/history?before={newest["id"]}').json()["items"][0]["id"] == record["id"]
+    assert client.get("/api/history/0").status_code == 404
+    from backend.models import MatchHistory
+    with api_session_factory() as session:
+        old = MatchHistory(payload_json=response.text)
+        session.add(old)
+        session.commit()
+        old_id = old.id
+    assert client.get(f'/api/history/{old_id}').json()["query_image_url"] is None
+    assert client.get(f'/api/history/{old_id}/image').status_code == 404
+
+
+def test_single_import_labels_and_search_without_product(client, monkeypatch, api_session_factory):
+    from backend.scene import SceneClient, SceneError
+    from backend.models import ProductImage
+    from sqlalchemy import select
+
+    tags = dict(room="客厅", sofa_status="present", sofa_color="米色",
+                floor_status="present", floor_color="浅灰色", floor_material="瓷砖/石材")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-placeholder")
+    calls = []
+    def identify(self, image):
+        calls.append(image.size)
+        return tags
+    monkeypatch.setattr(SceneClient, "identify", identify)
+    ids = []
+    for color in ("#234567", "#345678"):
+        uploaded = client.post('/api/library', files={'image': ('single.png', png_bytes(color), 'image/png')})
+        assert uploaded.status_code == 200
+        assert uploaded.json()['scene_labels'] == tags
+        ids.append(uploaded.json()['image']['id'])
+    assert len(calls) == 2
+    duplicate = client.post('/api/library', files={'image': ('single.png', png_bytes('#234567'), 'image/png')})
+    assert duplicate.json()['status'] == 'duplicate'
+    assert len(calls) == 2  # 复用已有标签，不重复调用视觉模型。
+    with api_session_factory() as session:
+        assert not list(session.scalars(select(ProductImage).where(ProductImage.image_id.in_(ids))))
+    matches = client.post('/api/search?top_k=10', files={'image': ('query.png', png_bytes(), 'image/png')})
+    assert matches.status_code == 200
+    rows = {item['matched_buyer_image_url']: item for item in matches.json()['results']}
+    for image_id in ids:
+        row = rows[f'/api/images/{image_id}']
+        assert row['product_id'] is None
+        assert row['product_image_url'] is None
+        assert row['product_download_url'] is None
+        assert row['scene_labels'] == tags
+
+    def unavailable(self, image):
+        raise SceneError('test unavailable')
+    monkeypatch.setattr(SceneClient, 'identify', unavailable)
+    failed_label = client.post('/api/library', files={'image': ('single.png', png_bytes('#456789'), 'image/png')})
+    assert failed_label.status_code == 200
+    assert failed_label.json()['scene_labels'] is None
+    assert '未生成' in failed_label.json()['message']
+    monkeypatch.setattr(SceneClient, 'identify', identify)
+    retry = client.post('/api/library', files={'image': ('single.png', png_bytes('#456789'), 'image/png')})
+    assert retry.json()['scene_labels'] == tags
+
+
+def test_strict_search_requires_labels_and_accepts_confirmation(client, monkeypatch):
+    from backend.scene import SceneClient, SceneError
+    calls = []
+    def unavailable(self, image):
+        raise SceneError('unavailable')
+    monkeypatch.setattr(SceneClient, 'identify', unavailable)
+    monkeypatch.setattr(ImageRepository, 'search_products', lambda *args, **kwargs: calls.append(kwargs) or [])
+    files = {'image': ('query.png', png_bytes(), 'image/png')}
+    automatic = client.post('/api/search', files=files)
+    assert automatic.status_code == 200
+    assert automatic.json()['results'] == []
+    assert not calls
+    tags = dict(room='客厅', sofa_status='present', sofa_color='米色',
+                floor_status='present', floor_color='米色', floor_material='瓷砖/石材')
+    confirmed = client.post('/api/search', files=files, data={'confirmed_scene': json.dumps(tags)})
+    assert confirmed.status_code == 200
+    assert confirmed.json()['query_scene'] == tags
+    assert calls[0]['scene_labels'] == tags
+    invalid = client.post('/api/search', files=files, data={'confirmed_scene': '{}'})
+    assert invalid.status_code == 400
+
+
 def png_bytes(color: str = "red") -> bytes:
     """构造真实图片上传内容，避免绕过 Pillow 校验。"""
     output = BytesIO()
@@ -79,7 +198,8 @@ def api_session_factory(database_engine):
     """每个测试以外层事务隔离 API 写入，结束时只回滚自己的数据。"""
     connection = database_engine.connect()
     transaction = connection.begin()
-    factory = sessionmaker(bind=connection, class_=Session, expire_on_commit=False)
+    factory = sessionmaker(bind=connection, class_=Session, expire_on_commit=False,
+                           join_transaction_mode="create_savepoint")
     try:
         yield factory
     finally:
@@ -225,6 +345,8 @@ def test_library_upload_persists_image_vector_and_optional_metadata(
     repository: ImageRepository,
 ) -> None:
     """若上传未复用入库服务，图片、向量或商品资料会缺失。"""
+    initial_images = repository.image_count()
+    initial_embeddings = repository.embedding_count()
     response = client.post(
         "/api/library",
         files={"image": ("buyer.png", png_bytes(), "image/png")},
@@ -235,8 +357,8 @@ def test_library_upload_persists_image_vector_and_optional_metadata(
     assert response.json()["status"] == "imported"
     assert response.json()["image"]["product_name"] == "云朵地毯"
     assert response.json()["image"]["price"] == 899.0
-    assert repository.image_count() == 1
-    assert repository.embedding_count() == 1
+    assert repository.image_count() == initial_images + 1
+    assert repository.embedding_count() == initial_embeddings + 1
 
 
 def test_library_duplicate_upload_preserves_and_supplements_metadata(
@@ -300,6 +422,15 @@ def test_image_endpoint_reads_only_database_registered_library_file(
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert response.content == content
+
+    preview = client.get(f"/api/images/{image_id}?preview=1")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/jpeg"
+    with Image.open(BytesIO(preview.content)) as rendered:
+        assert max(rendered.size) <= 1200
+    original = client.get(f"/api/images/{image_id}?preview=1&download=1")
+    assert original.content == content
+    assert "attachment" in original.headers["content-disposition"]
 
 
 def test_image_endpoint_returns_404_when_record_or_file_is_missing(client: TestClient) -> None:

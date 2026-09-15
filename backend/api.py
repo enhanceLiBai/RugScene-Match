@@ -5,15 +5,22 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 import json
+import asyncio
+from starlette.concurrency import run_in_threadpool
+import threading
+from functools import lru_cache
+from io import BytesIO
+from PIL import Image, ImageOps
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import text
+from sqlalchemy import text, select
+from backend.models import MatchHistory, MatchHistoryImage, SceneLabel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,10 +29,22 @@ from backend.db import create_session_factory, dispose_session_factory
 from backend.encoders.base import EncoderIdentity, ImageEncoder
 from backend.encoders.factory import create_encoder
 from backend.excel_import import ExcelImportService, cleanup_import_job
-from backend.image_assets import InvalidImageError, validate_image_bytes
+from backend.image_assets import InvalidImageError, ValidatedImage, validate_image_bytes
 from backend.repository import ImageMetadata, ImageRepository, LibraryRow, SearchRow
 from backend.services import ImportStatus, LibraryService
-from backend.scene import SceneClient, SceneError, backfill
+from backend.scene import SceneClient, SceneError, backfill, validate_labels, usable_scene
+
+
+@lru_cache(maxsize=32)
+def preview_bytes(path: str, modified_ns: int) -> bytes:
+    """缓存最近查看的预览图；文件修改后自动使用新缓存键。"""
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+        image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=88, optimize=True)
+        return output.getvalue()
+from backend.matching import review_conflicts
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -78,6 +97,7 @@ class LibraryImportResponse(BaseModel):
     status: Literal["imported", "duplicate", "embedding_added"]
     message: str
     image: LibraryImageResponse
+    scene_labels: dict[str, str] | None = None
 
 
 class SearchResultResponse(BaseModel):
@@ -101,14 +121,16 @@ class SearchResultResponse(BaseModel):
 
 class ProductSearchResponse(BaseModel):
     rank: int
-    product_id: str
+    product_id: str | None
     matched_buyer_image_url: str
-    product_image_url: str
-    matched_source_column: str
+    product_image_url: str | None
+    matched_source_column: str | None
     similarity: float
     scene_labels: dict[str, str] | None = None
     matched_buyer_download_url: str | None = None
     product_download_url: str | None = None
+    match_explanation: str | None = None
+    buyer_image_id: int | None = None
 
 
 class SearchResponse(BaseModel):
@@ -211,6 +233,12 @@ def create_app(
     application_import_runner = import_runner or ExcelImportService(
         application_settings, application_encoder, application_session_factory
     ).run
+    # 模型推理和批量入库共享本机 GPU/CPU；限制重任务并发，避免少量客服同时操作拖垮服务。
+    search_semaphore = asyncio.Semaphore(8)
+    import_lock = threading.Lock()
+    def run_import_serialized(job_id: str, path: Path) -> None:
+        with import_lock:
+            application_import_runner(job_id, path)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -221,6 +249,66 @@ def create_app(
                 dispose_session_factory(application_session_factory)
 
     app = FastAPI(title="地毯图片相似检索 API", lifespan=lifespan)
+
+    def save_match(payload: SearchResponse, customer_image: ValidatedImage) -> SearchResponse:
+        """单独事务保存快照，记录故障不丢失本次检索结果。"""
+        try:
+            with application_session_factory() as session:
+                record = MatchHistory(payload_json=payload.model_dump_json())
+                session.add(record)
+                session.flush()
+                session.add(MatchHistoryImage(history_id=record.id,
+                    content=customer_image.raw_bytes, mime_type=customer_image.mime_type))
+                session.commit()
+        except SQLAlchemyError:
+            payload.message = (payload.message or '') + ' 本次历史记录保存失败，请保留当前结果。'
+        return payload
+
+    @app.get('/api/history')
+    def match_history(before: int | None = Query(None, ge=1)):
+        try:
+            with application_session_factory() as session:
+                stmt = select(MatchHistory).order_by(MatchHistory.id.desc()).limit(21)
+                if before is not None:
+                    stmt = stmt.where(MatchHistory.id < before)
+                rows = list(session.scalars(stmt))
+                image_ids = set(session.scalars(select(MatchHistoryImage.history_id).where(
+                    MatchHistoryImage.history_id.in_([row.id for row in rows[:20]]))))
+                items = []
+                for row in rows[:20]:
+                    payload = json.loads(row.payload_json)
+                    items.append({'id':row.id, 'created_at':row.created_at.isoformat(),
+                                  'query_image_url':f'/api/history/{row.id}/image' if row.id in image_ids else None,
+                                  'query_scene':payload.get('query_scene'),
+                                  'result_count':len(payload.get('results',[]))})
+                return {'items':items,'next_before':items[-1]['id'] if len(rows)>20 else None}
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503,detail='历史记录暂不可用。') from None
+
+    @app.get('/api/history/{history_id}')
+    def match_history_detail(history_id: int):
+        try:
+            with application_session_factory() as session:
+                row = session.get(MatchHistory,history_id)
+                if row is None:
+                    raise HTTPException(status_code=404,detail='历史记录不存在。')
+                has_image = session.scalar(select(MatchHistoryImage.history_id).where(MatchHistoryImage.history_id == row.id))
+                return {'id':row.id,'created_at':row.created_at.isoformat(),'payload':json.loads(row.payload_json),
+                        'query_image_url':f'/api/history/{row.id}/image' if has_image else None}
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503,detail='历史记录暂不可用。') from None
+
+    @app.get('/api/history/{history_id}/image')
+    def match_history_image(history_id: int):
+        try:
+            with application_session_factory() as session:
+                stored = session.get(MatchHistoryImage, history_id)
+                if stored is None:
+                    raise HTTPException(status_code=404, detail='该记录未保存客户照片。')
+                return Response(content=stored.content, media_type=stored.mime_type,
+                                headers={'Cache-Control': 'private, no-store'})
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503, detail='历史照片暂不可用。') from None
 
     @app.post('/api/scene-labels/backfill')
     def label_existing(background_tasks: BackgroundTasks):
@@ -268,7 +356,7 @@ def create_app(
             repository.create_import_job(job_id, original_name)
             repository.update_import_job(job_id, status="parsing")
             session.commit()
-            background_tasks.add_task(application_import_runner, job_id, workbook_path)
+            background_tasks.add_task(run_import_serialized, job_id, workbook_path)
             return {"job_id": job_id, "status": "parsing"}
         except HTTPException:
             cleanup_import_job(application_settings, job_id)
@@ -347,18 +435,16 @@ def create_app(
                 stock=_optional_text(stock),
                 selling_point=_optional_text(selling_point),
             )
-            service = LibraryService(
-                repository=repository,
-                encoder=application_encoder,
-                image_dir=application_settings.image_dir,
-                project_root=application_settings.project_root,
-            )
-            result = service.import_bytes(data, image.filename or "uploaded.png", metadata)
-            if result.status is ImportStatus.FAILED or result.image_id is None:
-                raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。")
-            row = next((item for item in repository.list_library() if item.image_id == result.image_id), None)
+            service = ExcelImportService(application_settings, application_encoder, application_session_factory)
+            imported, encoded = service.import_single(data, image.filename or "uploaded.png", metadata)
+            record = repository.find_by_sha256(validated.sha256)
+            row = next((item for item in repository.list_library() if item.image_id == record.id), None)
             if row is None:
                 raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。")
+            from backend.scene import VERSION
+            with application_session_factory() as label_session:
+                label = label_session.get(SceneLabel, record.id)
+                labels = json.loads(label.labels_json) if label and label.model == scene_client.model and label.version == VERSION else None
         except (InvalidImageError, ValueError) as error:
             raise HTTPException(status_code=400, detail="图片或商品信息无效，请检查后重试。") from error
         except SQLAlchemyError as error:
@@ -366,85 +452,134 @@ def create_app(
         finally:
             await image.close()
 
-        status_by_result = {
-            ImportStatus.IMPORTED: "imported",
-            ImportStatus.DUPLICATE: "duplicate",
-            ImportStatus.EMBEDDING_ADDED: "embedding_added",
-        }
         return LibraryImportResponse(
-            status=status_by_result[result.status],
-            message=result.message,
+            status="imported" if imported else "embedding_added" if encoded else "duplicate",
+            message="图片已入库，场景标签已就绪。" if labels else "图片已入库，但场景标签未生成；请点击补充已有买家秀场景标签后再测试场景检索。",
             image=_library_image_response(row),
+            scene_labels=labels,
         )
 
     @app.get("/api/images/{image_id}")
-    def image(image_id: int, download: int = Query(0, ge=0, le=1), repository: ImageRepository = Depends(get_repository)) -> FileResponse:
+    def image(image_id: int, download: int = Query(0, ge=0, le=1), preview: int = Query(0, ge=0, le=1)) -> Response:
         """按数据库记录读取图库文件，拒绝越出 data/images 的历史坏路径。"""
         try:
-            record = repository.find_by_id(image_id)
+            with application_session_factory() as session:
+                record = ImageRepository(session).find_by_id(image_id)
+                if record is None:
+                    raise HTTPException(status_code=404, detail="图片不存在。")
+                stored_name, mime_type, original_name = record.stored_path, record.mime_type, record.original_name
         except SQLAlchemyError as error:
             raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
         if record is None:
             raise HTTPException(status_code=404, detail="图片不存在。")
 
         image_root = application_settings.image_dir.resolve()
-        stored_path = (application_settings.project_root / record.stored_path).resolve()
+        stored_path = (application_settings.project_root / stored_name).resolve()
         if not stored_path.is_relative_to(image_root):
             raise HTTPException(status_code=400, detail="图片存储路径无效。")
         if not stored_path.is_file():
             raise HTTPException(status_code=404, detail="图片不存在。")
-        return FileResponse(stored_path, media_type=record.mime_type, filename=record.original_name if download else None, content_disposition_type="attachment" if download else "inline")
+        if preview and not download:
+            return Response(preview_bytes(str(stored_path), stored_path.stat().st_mtime_ns),
+                            media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+        return FileResponse(stored_path, media_type=mime_type, filename=original_name if download else None, content_disposition_type="attachment" if download else "inline")
 
-    @app.post("/api/search", response_model=SearchResponse)
-    async def search(
-        image: UploadFile = File(...),
-        repository: ImageRepository = Depends(get_repository),
-        top_k: int = Query(5, ge=1, le=50),
-    ) -> SearchResponse:
-        """在内存中校验并编码上传图片，查询过程绝不写入图库或数据库。"""
+    @app.delete("/api/library/{image_id}")
+    def delete_library_image(image_id: int, repository: ImageRepository = Depends(get_repository)) -> dict[str, object]:
+        """删除图库图片及向量、标签和商品关联；历史结果快照保持不变。"""
         try:
-            data = await image.read(MAX_UPLOAD_BYTES + 1)
+            record = repository.find_by_id(image_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="图库图片不存在。")
+            path = (application_settings.project_root / record.stored_path).resolve()
+            if not path.is_relative_to(application_settings.image_dir.resolve()):
+                raise HTTPException(status_code=400, detail="图片存储路径无效。")
+            repository._session.delete(record)
+            repository._session.commit()
+            if path.is_file():
+                path.unlink()
+            return {"deleted": True, "image_id": image_id}
+        except HTTPException:
+            raise
+        except (SQLAlchemyError, OSError):
+            repository._session.rollback()
+            raise HTTPException(status_code=503, detail="图片删除失败，请稍后重试。") from None
+
+    def execute_search(data, filename, confirmed_scene, top_k):
+        with application_session_factory() as session:
+            return search_sync(data, filename, confirmed_scene, top_k, ImageRepository(session))
+
+    def search_sync(data, filename, confirmed_scene, top_k, repository):
+        try:
             if len(data) > MAX_UPLOAD_BYTES:
                 raise HTTPException(status_code=400, detail="上传图片不能超过 20 MiB。")
-            validated = validate_image_bytes(data, image.filename or "uploaded.png")
+            validated = validate_image_bytes(data, filename)
             identity = application_encoder.identity
             query = application_encoder.encode(validated.image)
-            warning = None
-            try:
-                scene_labels = scene_client.identify(validated.image)
-            except SceneError:
-                scene_labels = None
-                warning = '场景识别暂不可用，本次仅按图片相似度检索。'
-            if scene_labels and any(scene_labels.get(k) != 'present' for k in ('sofa_status','floor_status')):
-                await image.close()
-                return SearchResponse(model=_model_response(identity), results=[], message='客户照片中的沙发或地板无法确认，无法执行严格场景匹配。', query_scene=scene_labels)
-            if scene_labels and any(scene_labels.get(k) == '无法判断' for k in ('sofa_color','floor_color','floor_material')):
-                await image.close()
-                return SearchResponse(model=_model_response(identity), results=[], message='客户照片的沙发颜色、地板颜色或材质无法确认，无法执行严格场景匹配。', query_scene=scene_labels)
+            if confirmed_scene is not None:
+                try:
+                    scene_labels = validate_labels(json.loads(confirmed_scene))
+                except (ValueError, TypeError):
+                    raise HTTPException(status_code=400, detail='手动确认的场景标签格式无效。') from None
+            else:
+                try:
+                    scene_labels = scene_client.identify(validated.image)
+                except SceneError:
+                    scene_labels = None
+            if not usable_scene(scene_labels):
+                return save_match(SearchResponse(model=_model_response(identity), results=[], message='场景识别不可用或关键属性无法确认，请在下方手动确认空间、沙发与地板后重新匹配。本次未放宽筛选。', query_scene=scene_labels), validated)
             rows = repository.search_products(identity, query, top_k=top_k, scene_labels=scene_labels, scene_model=scene_client.model)
+            review_notes = {}
+            review_count = review_failures = 0
+            # 人工明确确认的标签保持硬约束，不由二次模型覆盖。
+            if confirmed_scene is None:
+                visual_candidates = repository.search_products(identity, query, top_k=20,
+                    scene_labels=scene_labels, scene_model=scene_client.model, filter_scene=False)
+                rows, review_notes, review_count, review_failures = review_conflicts(
+                    application_settings, repository, scene_client, validated.image, scene_labels,
+                    rows, visual_candidates, top_k)
         except InvalidImageError as error:
             raise HTTPException(status_code=400, detail="图片无效或格式不受支持。") from error
         except SQLAlchemyError as error:
             raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
-        finally:
-            await image.close()
 
         results = [
             ProductSearchResponse(
                 rank=rank,
                 product_id=row.product_id,
                 matched_buyer_image_url=f"/api/images/{row.buyer_image_id}",
-                product_image_url=f"/api/images/{row.product_image_id}",
+                buyer_image_id=row.buyer_image_id,
+                product_image_url=f"/api/images/{row.product_image_id}" if row.product_image_id else None,
                 matched_source_column=row.source_column,
                 similarity=row.similarity_percent,
                 scene_labels=row.scene_labels,
                 matched_buyer_download_url=f"/api/images/{row.buyer_image_id}?download=1",
-                product_download_url=f"/api/images/{row.product_image_id}?download=1",
+                product_download_url=f"/api/images/{row.product_image_id}?download=1" if row.product_image_id else None,
+                match_explanation=review_notes.get(row.buyer_image_id),
             )
             for rank, row in enumerate(rows, start=1)
         ]
-        message = None if results else "暂无关联主图的买家秀，请先在图库导入 Excel。"
-        return SearchResponse(model=_model_response(identity), results=results, message=warning or message, query_scene=scene_labels)
+        message = '按空间、沙发与地板属性筛选，同灰色系允许深浅差异，通过后按图片相似度排序。' if results else '暂无通过属性筛选或双图复核的买家秀；请核对标签或补充图库。'
+        if review_count:
+            message += f' 已对 {review_count} 张高相似度冲突候选进行双图复核。'
+        if review_failures:
+            message += f' 其中 {review_failures} 张复核未完成，未将其放行；可重试。'
+        return save_match(SearchResponse(model=_model_response(identity), results=results, message=message, query_scene=scene_labels), validated)
+
+    @app.post("/api/search", response_model=SearchResponse)
+    async def search(
+        image: UploadFile = File(...),
+        confirmed_scene: str | None = Form(None),
+        top_k: int = Query(5, ge=1, le=50),
+    ) -> SearchResponse:
+        """最多八个匹配并行，完整同步流程在线程中执行。"""
+        try:
+            async with search_semaphore:
+                data = await image.read(MAX_UPLOAD_BYTES + 1)
+                return await run_in_threadpool(
+                    execute_search, data, image.filename or "uploaded.png", confirmed_scene, top_k)
+        finally:
+            await image.close()
 
     @app.get("/", include_in_schema=False)
     def frontend_index() -> FileResponse:

@@ -37,7 +37,7 @@
     return {
       productId: String(item.product_id || '未填写'),
       similarity: `${item.similarity ?? 0}%`,
-      sourceLabel: `买家秀 ${item.matched_source_column || ''} 列`,
+      sourceLabel: item.matched_source_column ? `买家秀 ${item.matched_source_column} 列` : '单张导入买家秀',
     };
   }
 
