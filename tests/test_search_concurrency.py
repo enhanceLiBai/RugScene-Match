@@ -12,6 +12,8 @@ from backend.encoders.base import EncoderIdentity
 
 
 def test_eight_reviews_do_not_block_frontend(monkeypatch):
+    from backend import auth
+    monkeypatch.setattr(auth, 'resolve_user', lambda *_args: {'id': 1, 'role': 'customer_service'})
     barrier = Barrier(8, timeout=10)
     entered = Event()
     release = Event()

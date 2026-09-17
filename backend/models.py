@@ -107,11 +107,29 @@ class SceneLabel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class UserAccount(Base):
+    __tablename__ = 'user_accounts'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LoginSession(Base):
+    __tablename__ = 'login_sessions'
+    token_hash: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('user_accounts.id'), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MatchHistory(Base):
     """保存当次结果快照；客户图片独立关联，不进入检索图库。"""
     __tablename__ = "match_history"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('user_accounts.id'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -121,6 +139,28 @@ class MatchHistoryImage(Base):
     history_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("match_history.id", ondelete="CASCADE"), primary_key=True)
     content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class MatchFeedback(Base):
+    """客服对整次推荐的评价，关联持久化的客户照片及结果快照。"""
+    __tablename__ = "match_feedback"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    history_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("match_history.id"), nullable=False)
+    helpful: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    submitted_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('user_accounts.id'), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MatchConversion(Base):
+    """一条匹配最多登记一次成功转化；商品来自不可变的结果快照。"""
+    __tablename__ = 'match_conversions'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    history_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('match_history.id'), nullable=False, unique=True)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_by: Mapped[int] = mapped_column(BigInteger, ForeignKey('user_accounts.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ImportJob(Base):

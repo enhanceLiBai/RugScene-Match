@@ -1,5 +1,6 @@
 const api = CarpetApiClient.create();
 let queryFile;
+let resultCustomerUrl;
 let latestLibraryRequest = 0;
 let hasLoadedLibrary = false;
 const previewUrls = new WeakMap();
@@ -66,19 +67,38 @@ function renderLibrary(images) {
     sku.textContent = `SKU：${view.sku}`;
     chips.textContent = view.chips.join(' · ') || '元数据未填写';
     details.append(name, sku, chips);
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'delete-image-button';
+    deleteButton.textContent = '从图库删除';
+    deleteButton.onclick = async () => {
+      if (!window.confirm('确定从图库删除这张图片吗？历史记录仍会保留，但图片将无法打开。')) return;
+      deleteButton.disabled = true;
+      try {
+        await api.deleteLibraryImage(item.id);
+        await refreshLibrary();
+      } catch (error) {
+        deleteButton.disabled = false;
+        setStatus($('#libraryStatus'), error.message || '删除失败，请重试。', 'error');
+      }
+    };
+    details.append(deleteButton);
     entry.append(image, details);
     grid.append(entry);
   });
 }
 
-function renderResults(payload) {
+function renderResults(payload, customerFile, savedCustomerUrl = null) {
+  if (resultCustomerUrl) URL.revokeObjectURL(resultCustomerUrl);
+  resultCustomerUrl = customerFile ? URL.createObjectURL(customerFile) : null;
+  renderConversionForm(payload);
+  const customerUrl = resultCustomerUrl || savedCustomerUrl;
   document.querySelectorAll('[data-scene-field]').forEach((select) => {
     select.value = payload.query_scene?.[select.dataset.sceneField] || '';
   });
   const labelText = (tags) => tags ? `空间：${tags.room} · 沙发：${tags.sofa_status === 'present' ? tags.sofa_color : tags.sofa_status} · 地板：${tags.floor_status === 'present' ? `${tags.floor_color} / ${tags.floor_material}` : tags.floor_status}` : '尚无场景标签';
   $('#queryScene').textContent = `客户场景识别：${labelText(payload.query_scene)}`;
-  const deletedIds = new Set(JSON.parse(sessionStorage.getItem('deletedLibraryImageIds') || '[]'));
-  const matches = (payload.results || []).filter((item) => !deletedIds.has(Number(item.buyer_image_id)));
+  const matches = payload.results || [];
   const grid = $('#resultGrid');
   grid.replaceChildren();
 
@@ -97,15 +117,18 @@ function renderResults(payload) {
     const images = fragment.querySelector('.result-images');
     if (images) {
       images.querySelector('.buyer-image').src = item.matched_buyer_image_url + '?preview=1';
-      const productImage = images.querySelector('.product-image');
-      if (item.product_image_url) productImage.src = item.product_image_url + '?preview=1';
+      const customerImage = images.querySelector('.customer-image');
+      if (customerUrl) customerImage.src = customerUrl;
       else {
-        productImage.hidden = true;
-        productImage.parentElement.querySelector('figcaption').textContent = '未提供商品主图';
+        customerImage.hidden = true;
+        customerImage.parentElement.querySelector('figcaption').textContent = '客户照片暂不可用';
       }
       images.querySelector('.buyer-download').href = item.matched_buyer_download_url || item.matched_buyer_image_url;
-      const productDownload = images.querySelector('.product-download');
-      if (productDownload) productDownload.href = item.product_download_url || item.product_image_url;
+      const customerDownload = images.querySelector('.customer-download');
+      if (customerDownload) {
+        customerDownload.hidden = !customerUrl;
+        if (customerUrl) customerDownload.href = customerUrl;
+      }
       images.querySelectorAll('img').forEach((image) => {
         image.onerror = () => { image.hidden = true; image.parentElement.querySelector('figcaption').textContent = `${image.alt}暂不可用`; };
       });
@@ -113,6 +136,12 @@ function renderResults(payload) {
     fragment.querySelector('.score').textContent = `图片相似度分 ${item.similarity}`;
     fragment.querySelector('.match-reason').textContent = item.match_explanation || view.sourceLabel;
     fragment.querySelector('h4').textContent = `商品 ID：${view.productId}`;
+    if (item.style?.trim()) {
+      const styleName = document.createElement('p');
+      styleName.className = 'product-info';
+      styleName.textContent = `款式：${item.style.trim()}`;
+      fragment.querySelector('h4').after(styleName);
+    }
     const copyId = document.createElement('button');
     copyId.textContent = '复制商品 ID';
     copyId.hidden = !item.product_id;
@@ -125,32 +154,36 @@ function renderResults(payload) {
     copyImage.type = 'button';
     copyImage.textContent = '复制图片';
     copyImage.onclick = async () => {
+      if (copyImage.disabled) return;
+      if (!window.isSecureContext || !navigator.clipboard?.write || !window.ClipboardItem) {
+        copyImage.textContent = '请右键图片选择复制';
+        return;
+      }
+      copyImage.disabled = true;
+      copyImage.textContent = '正在复制…';
       try {
-        const response = await fetch(item.matched_buyer_image_url);
-        const blob = await response.blob();
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        // 立即调用剪贴板 API 保留点击授权，图片准备通过 Promise 完成。
+        const png = (async () => {
+          const displayed = card.querySelector('.buyer-image') || card.querySelector('img');
+          if (!displayed) throw new Error('图片不存在');
+          await displayed.decode();
+          const canvas = document.createElement('canvas');
+          canvas.width = displayed.naturalWidth;
+          canvas.height = displayed.naturalHeight;
+          canvas.getContext('2d').drawImage(displayed, 0, 0);
+          return await new Promise((resolve, reject) => {
+            canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('图片转换失败')), 'image/png');
+          });
+        })();
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
         copyImage.textContent = '已复制';
-        setTimeout(() => { copyImage.textContent = '复制图片'; }, 1400);
-      } catch { copyImage.textContent = '复制失败'; }
-    };
-    fragment.querySelector('.sku-line').append(copyImage);
-    const deleteButton = fragment.querySelector('.delete-image-button');
-    deleteButton.onclick = async () => {
-      if (!window.confirm('确定从图库删除这张图片吗？历史记录仍会保留，但图片将无法打开。')) return;
-      deleteButton.disabled = true;
-      try {
-        await api.deleteLibraryImage(item.buyer_image_id);
-        const deleted = new Set(JSON.parse(sessionStorage.getItem('deletedLibraryImageIds') || '[]'));
-        deleted.add(Number(item.buyer_image_id));
-        sessionStorage.setItem('deletedLibraryImageIds', JSON.stringify([...deleted]));
-        card.remove();
-        $('#matchHint').textContent = '图片已从图库删除；历史记录仍保留。';
-      } catch (error) {
-        deleteButton.disabled = false;
-        $('#matchHint').textContent = error.message || '删除失败，请稍后重试。';
+      } catch {
+        copyImage.textContent = '复制失败，请右键图片复制';
+      } finally {
+        copyImage.disabled = false;
       }
     };
-    deleteButton.hidden = !item.buyer_image_id;
+    fragment.querySelector('.sku-line').append(copyImage);
     (view.chips || []).forEach((value) => {
       const chip = document.createElement('span');
       chip.textContent = value;
@@ -165,13 +198,6 @@ function renderResults(payload) {
       event.currentTarget.textContent = '已复制';
       setTimeout(() => { event.currentTarget.textContent = '复制话术'; }, 1400);
     };
-    fragment.querySelectorAll('[data-feedback]').forEach((button) => {
-      button.onclick = () => {
-        const message = document.createElement('span');
-        message.textContent = '反馈已记录，后续会用于优化排序。';
-        button.parentElement.replaceChildren(message);
-      };
-    });
     grid.append(card);
   });
 
@@ -240,8 +266,7 @@ function setEntryFormBusy(form, busy) {
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  let historyCursor = null;
+function initializeMatchPage() {
   const sceneOptions = {
     room: ['空间', ['客厅','卧室','玄关','餐厅','书房']],
     sofa_color: ['沙发颜色', ['黑色','白色','米色','浅灰色','深灰色','棕色','浅木色','深木色','蓝色','绿色','红色','黄色']],
@@ -260,66 +285,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     label.append(select); $('#sceneFields').append(label);
   }
-  async function historyJson(url) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('历史记录读取失败，请重试。');
-    return response.json();
-  }
-  async function loadHistory(more = false) {
-    const status = $('#historyStatus');
-    $('#historyRefresh').disabled = $('#historyMore').disabled = true;
-    status.textContent = '正在读取…';
-    try {
-      const data = await historyJson('/api/history' + (more && historyCursor ? `?before=${historyCursor}` : ''));
-      if (!more) $('#historyList').replaceChildren();
-      for (const item of data.items) {
-        const button = document.createElement('button');
-        button.className = 'history-record';
-        const scene = item.query_scene;
-        button.textContent = `${new Date(item.created_at).toLocaleString()} · ${item.result_count} 条结果 · ${scene ? [scene.room,scene.sofa_color,scene.floor_color,scene.floor_material].filter(Boolean).join(' / ') : '未识别场景'} · 查看`;
-        if (item.query_image_url) {
-          const thumbnail = document.createElement('img');
-          thumbnail.src = item.query_image_url;
-          thumbnail.alt = '客户照片';
-          thumbnail.loading = 'lazy';
-          button.prepend(thumbnail);
-        } else {
-          button.append(' · 未保存客户照片');
-        }
-        button.onclick = async () => {
-          button.disabled = true;
-          try {
-            const detail = await historyJson(`/api/history/${item.id}`);
-            document.querySelector('[data-view="match"]').click();
-            queryFile = undefined;
-            $('#useConfirmedScene').checked = false;
-            $('#queryImage').value = '';
-            clearPreview($('#queryPreview'), $('.dropzone-copy'));
-            renderResults(detail.payload);
-            const customerImage = $('#historyCustomerImage');
-            customerImage.hidden = !detail.query_image_url;
-            customerImage.removeAttribute('src');
-            if (detail.query_image_url) customerImage.src = detail.query_image_url;
-            customerImage.onerror = () => {
-              customerImage.hidden = true;
-              $('#historyViewing').textContent += ' 客户照片加载失败，请重新打开记录。';
-            };
-            $('#historyViewing').hidden = false;
-            $('#historyViewing').textContent = `正在查看 ${new Date(detail.created_at).toLocaleString()} 的历史结果${detail.query_image_url ? '，下方为当时的客户照片。' : '（旧记录未保存客户照片）。'}`;
-          } catch (error) { status.textContent = error.message; }
-          finally { button.disabled = false; }
-        };
-        $('#historyList').append(button);
+  $('#queryImage').onchange = (event) => {
+    $('#useConfirmedScene').checked = false;
+    document.querySelectorAll('[data-scene-field]').forEach((select) => { select.value = ''; });
+    queryFile = event.target.files[0];
+    preview(event.target, $('#queryPreview'), $('.dropzone-copy'));
+  };
+  $('#matchButton').onclick = async () => {
+    if (!queryFile) {
+      $('#matchHint').textContent = '请先上传客户家的照片。';
+      return;
+    }
+
+    const button = $('#matchButton');
+    let confirmed = null;
+    if ($('#useConfirmedScene').checked) {
+      confirmed = {sofa_status: 'present', floor_status: 'present'};
+      document.querySelectorAll('[data-scene-field]').forEach((select) => { confirmed[select.dataset.sceneField] = select.value; });
+      if (Object.keys(sceneOptions).some((key) => !confirmed[key])) {
+        $('#matchHint').textContent = '请先确认全部四项场景属性。';
+        $('#sceneConfirmation').open = true;
+        return;
       }
-      historyCursor = data.next_before;
-      $('#historyMore').hidden = !historyCursor;
-      status.textContent = $('#historyList').children.length ? '' : '暂无记录，完成一次检索后会自动保存。';
-    } catch (error) { status.textContent = error.message; }
-    finally { $('#historyRefresh').disabled = $('#historyMore').disabled = false; }
-  }
-  $('#historyRefresh').onclick = () => loadHistory();
-  $('#historyMore').onclick = () => loadHistory(true);
-  document.querySelector('[data-view="history"]').addEventListener('click', () => loadHistory());
+    }
+    const input = $('#queryImage');
+    const requestedFile = queryFile;
+    setBusy(button, true, '匹配中…');
+    input.disabled = true;
+    $('#results').hidden = true;
+    $('#matchHint').textContent = '正在识别场景并检索；高相似度但标签冲突的候选会进行双图复核，请稍候…';
+    try {
+      const payload = await api.searchSimilar(requestedFile, Number($('#topK').value), confirmed);
+      renderResults(payload, requestedFile);
+      if (!payload.results?.length) $('#sceneConfirmation').open = true;
+    } catch (error) {
+      $('#results').hidden = true;
+      $('#matchHint').textContent = error.message || '匹配失败，请稍后重试。';
+    } finally {
+      input.disabled = false;
+      setBusy(button, false, '匹配中…');
+    }
+  };
+
+  window.addEventListener('beforeunload', () => {
+    revokePreview($('#queryPreview'));
+    if (resultCustomerUrl) URL.revokeObjectURL(resultCustomerUrl);
+  });
+}
+
+function initializeLibraryPage() {
   $('#labelExisting').onclick = async () => {
     const button = $('#labelExisting'); button.disabled = true;
     const output = $('#labelStatus'); output.textContent = '正在补充场景标签…';
@@ -339,67 +353,9 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   refreshLibrary();
 
-  document.querySelectorAll('.tab').forEach((button) => {
-    button.onclick = () => {
-      document.querySelectorAll('.tab,.view').forEach((element) => element.classList.remove('active'));
-      button.classList.add('active');
-      $(`#${button.dataset.view}`).classList.add('active');
-    };
-  });
-
-  $('#queryImage').onchange = (event) => {
-    $('#useConfirmedScene').checked = false;
-    document.querySelectorAll('[data-scene-field]').forEach((select) => { select.value = ''; });
-    $('#historyCustomerImage').hidden = true;
-    $('#historyViewing').hidden = true;
-    queryFile = event.target.files[0];
-    preview(event.target, $('#queryPreview'), $('.dropzone-copy'));
-  };
   $('#entryImage').onchange = (event) => preview(event.target, $('#entryPreview'), $('#entryImageText'));
   $('#reloadLibraryButton').onclick = refreshLibrary;
-  window.addEventListener('beforeunload', () => {
-    revokePreview($('#queryPreview'));
-    revokePreview($('#entryPreview'));
-  });
-
-  $('#matchButton').onclick = async () => {
-    if (!queryFile) {
-      $('#matchHint').textContent = '请先上传客户家的照片。';
-      return;
-    }
-
-    const button = $('#matchButton');
-    let confirmed = null;
-    if ($('#useConfirmedScene').checked) {
-      confirmed = {sofa_status: 'present', floor_status: 'present'};
-      document.querySelectorAll('[data-scene-field]').forEach((select) => { confirmed[select.dataset.sceneField] = select.value; });
-      if (Object.keys(sceneOptions).some((key) => !confirmed[key])) {
-        $('#matchHint').textContent = '请先确认全部四项场景属性。';
-        $('#sceneConfirmation').open = true;
-        return;
-      }
-    }
-    $('#historyViewing').hidden = true;
-    $('#historyCustomerImage').hidden = true;
-    const input = $('#queryImage');
-    const requestedFile = queryFile;
-    setBusy(button, true, '匹配中…');
-    input.disabled = true;
-    $('#results').hidden = true;
-    $('#matchHint').textContent = '正在识别场景并检索；高相似度但标签冲突的候选会进行双图复核，请稍候…';
-    try {
-      const payload = await api.searchSimilar(requestedFile, Number($('#topK').value), confirmed);
-      renderResults(payload);
-      if (!payload.results?.length) $('#sceneConfirmation').open = true;
-    } catch (error) {
-      $('#results').hidden = true;
-      $('#matchHint').textContent = error.message || '匹配失败，请稍后重试。';
-    } finally {
-      input.disabled = false;
-      setBusy(button, false, '匹配中…');
-    }
-  };
-
+  window.addEventListener('beforeunload', () => revokePreview($('#entryPreview')));
   $('#entryForm').onsubmit = async (event) => {
     event.preventDefault();
     const file = $('#entryImage').files[0];
@@ -478,4 +434,9 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) { $('#excelStatus').textContent = error.message || '导入失败'; }
     finally { importBusy(false); }
   };
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  if ($('#matchButton')) initializeMatchPage();
+  if ($('#entryForm')) initializeLibraryPage();
 });

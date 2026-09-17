@@ -36,6 +36,8 @@ def create_database_and_schema(settings: Settings) -> None:
             _upgrade_sha256_column(connection)
             _ensure_sha256_check_constraint(connection)
             _upgrade_image_metadata_columns(connection)
+            connection.execute(text('ALTER TABLE match_history ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES user_accounts(id)'))
+            connection.execute(text('ALTER TABLE match_feedback ADD COLUMN IF NOT EXISTS submitted_by BIGINT REFERENCES user_accounts(id)'))
     finally:
         engine.dispose()
 

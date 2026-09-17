@@ -1,6 +1,7 @@
 """图片与模型向量的持久化仓库，不负责事务提交或回滚。"""
 
 from __future__ import annotations
+from backend.observability import timed
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -68,6 +69,7 @@ class ProductSearchRow:
     source_column: str | None
     similarity_percent: float
     scene_labels: dict | None = None
+    style: str | None = None
 
 
 @dataclass(frozen=True)
@@ -384,13 +386,14 @@ class ImageRepository:
         # Core UPSERT 不会自动同步已加载的 ORM 行，统一过期以保证后续读取不会使用旧向量。
         self._session.expire_all()
 
+    @timed("database_search")
     def search_products(self, identity: EncoderIdentity, query: np.ndarray, *, top_k: int = 5, scene_labels=None, scene_model=None, filter_scene: bool = True) -> list[ProductSearchRow]:
         """召回场景候选，按商品保留最高分买家秀和当前主图。"""
         buyer = aliased(ProductImage)
         main = aliased(ProductImage)
         distance = ImageEmbedding.embedding.cosine_distance(_validated_vector(identity, query))
         statement = (
-            select(buyer.product_id, ImageRecord.id, main.image_id, buyer.source_column, distance)
+            select(buyer.product_id, ImageRecord.id, main.image_id, buyer.source_column, distance, ImageRecord.style)
             .select_from(ImageRecord)
             .join(ImageEmbedding, ImageEmbedding.image_id == ImageRecord.id)
             .outerjoin(buyer, and_(buyer.image_id == ImageRecord.id,
@@ -409,13 +412,13 @@ class ImageRepository:
         from backend.scene import VERSION, score_scene
         labels = {x.image_id: json.loads(x.labels_json) for x in self._session.scalars(select(SceneLabel).where(SceneLabel.model == scene_model, SceneLabel.version == VERSION))}
         candidates = []
-        for product_id, buyer_id, main_id, column, distance_value in self._session.execute(statement):
+        for product_id, buyer_id, main_id, column, distance_value, style in self._session.execute(statement):
             visual = cosine_distance_to_percent(float(distance_value))
             tags = labels.get(buyer_id)
             score = score_scene(scene_labels, tags, visual)[0] if filter_scene else visual
             if score < 0:
                 continue
-            candidates.append(ProductSearchRow(product_id,buyer_id,main_id,column,score,tags))
+            candidates.append(ProductSearchRow(product_id,buyer_id,main_id,column,score,tags,style))
         candidates.sort(key=lambda row: (-row.similarity_percent,row.buyer_image_id,row.product_id or ''))
         seen: set[tuple[str, str | int]] = set()
         results = []

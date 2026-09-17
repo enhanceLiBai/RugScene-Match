@@ -1,3 +1,4 @@
+from backend.observability import timed
 """共享场景识别、标签缓存及属性评分。"""
 import base64
 import json
@@ -18,6 +19,12 @@ STATUSES = ['present','not_present','unknown']
 OPTIONS = {'room': ROOMS, 'sofa_status': STATUSES, 'sofa_color': COLORS, 'floor_status': STATUSES, 'floor_color': COLORS, 'floor_material': MATERIALS}
 
 class SceneError(RuntimeError):
+    pass
+
+
+class SceneQuotaError(SceneError):
+    """视觉模型账户余额不足，调用方应停止当前批处理而不是继续重试。"""
+
     pass
 
 def _parse_json_response(content):
@@ -44,6 +51,7 @@ class SceneClient:
         self.url = config.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com').rstrip('/')
         self.model = config.get('DEEPSEEK_MODEL', 'deepseek-v4-flash-vision-exp')
 
+    @timed("scene_identify")
     def identify(self, image):
         prompt = '识别空间类型、沙发和地板。沙发颜色以主体面料为准，排除抱枕、毯子。地板颜色和材质只依据裸露的实际地面，必须排除地毯；地毯完全遮挡地面时不得猜测。考虑暖光和阴影，尽量识别物体本色。沙发/地板先填状态：present=画面确认存在，not_present=确认没有，unknown=可能存在但看不清；present时填写颜色/材质，否则颜色材质填无法判断。不确定时填无法判断。只返回JSON，键及允许值：' + json.dumps(OPTIONS, ensure_ascii=False)
         try:
@@ -51,6 +59,7 @@ class SceneClient:
         except ValueError:
             raise SceneError('场景标签格式无效') from None
 
+    @timed("scene_compare")
     def compare_scenes(self, query_image, candidate_image):
         """双图独立复核，不把缓存标签当作事实，也不以地毯相似替代场景匹配。"""
         prompt = (
@@ -72,7 +81,7 @@ class SceneClient:
             raise SceneError('场景复核格式无效')
         return all(result[k] == 'match' for k in keys), result['reason'][:300]
 
-    def _request(self, prompt, images, timeout=60):
+    def _request(self, prompt, images, timeout=60, json_only=False, max_tokens=2048):
         if not self.key:
             raise SceneError('未配置视觉模型密钥')
         content = [{'type': 'text', 'text': prompt}]
@@ -83,13 +92,21 @@ class SceneClient:
             content.append({'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+base64.b64encode(output.getvalue()).decode()}})
         try:
             r = httpx.post(self.url + '/chat/completions', headers={'Authorization': 'Bearer '+self.key}, json={
-                'model': self.model, 'temperature': 0, 'max_tokens': 2048,
+                'model': self.model, 'temperature': 0, 'max_tokens': max_tokens,
+                **({'response_format': {'type': 'json_object'}} if json_only else {}),
                 'thinking': {'type': 'disabled'},
                 'messages':[{'role':'user','content':content}]}, timeout=timeout, trust_env=False)
             r.raise_for_status()
             message = r.json()['choices'][0]['message']
             content = message.get('content') or message.get('reasoning_content')
             return _parse_json_response(content)
+        except httpx.HTTPStatusError as error:
+            body = error.response.text.casefold()
+            if (error.response.status_code == 402
+                    or any(marker in body for marker in ('insufficient_balance', 'balance not enough', '余额不足'))):
+                raise SceneQuotaError('视觉模型余额不足') from None
+            print(f"scene request failed: HTTP {error.response.status_code}", file=__import__('sys').stderr)
+            raise SceneError('场景识别暂不可用') from None
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as error:
             print(f"scene request failed: {type(error).__name__}: {error}", file=__import__('sys').stderr)
             raise SceneError('场景识别暂不可用') from None

@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 import json
 import asyncio
+from datetime import datetime, timedelta, timezone
 from starlette.concurrency import run_in_threadpool
 import threading
 from functools import lru_cache
@@ -16,15 +17,19 @@ from uuid import uuid4
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import text, select
-from backend.models import MatchHistory, MatchHistoryImage, SceneLabel
+from backend.models import MatchHistory, MatchHistoryImage, MatchFeedback, SceneLabel, UserAccount
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from backend.observability import stage, timed, match_trace
 from backend.config import Settings
+from backend.access import restrict_management_access
+from backend.auth import install_auth, public_user
+from backend.conversions import install_conversions
 from backend.db import create_session_factory, dispose_session_factory
 from backend.encoders.base import EncoderIdentity, ImageEncoder
 from backend.encoders.factory import create_encoder
@@ -131,6 +136,7 @@ class ProductSearchResponse(BaseModel):
     product_download_url: str | None = None
     match_explanation: str | None = None
     buyer_image_id: int | None = None
+    style: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -140,6 +146,13 @@ class SearchResponse(BaseModel):
     results: list[ProductSearchResponse]
     message: str | None = None
     query_scene: dict[str, str] | None = None
+    history_id: int | None = None
+
+
+class FeedbackRequest(BaseModel):
+    history_id: int = Field(gt=0)
+    helpful: StrictBool
+    reason: str = Field(default="", max_length=2000)
 
 
 def _model_response(identity: EncoderIdentity) -> ModelResponse:
@@ -249,35 +262,91 @@ def create_app(
                 dispose_session_factory(application_session_factory)
 
     app = FastAPI(title="地毯图片相似检索 API", lifespan=lifespan)
+    install_auth(app, application_session_factory, application_frontend_root)
+    install_conversions(app, application_session_factory)
+    app.middleware('http')(restrict_management_access)
 
-    def save_match(payload: SearchResponse, customer_image: ValidatedImage) -> SearchResponse:
+    @timed("history_save")
+    def save_match(payload: SearchResponse, customer_image: ValidatedImage, user_id: int) -> SearchResponse:
         """单独事务保存快照，记录故障不丢失本次检索结果。"""
         try:
             with application_session_factory() as session:
-                record = MatchHistory(payload_json=payload.model_dump_json())
+                record = MatchHistory(payload_json=payload.model_dump_json(), user_id=user_id)
                 session.add(record)
                 session.flush()
+                payload.history_id = record.id
+                record.payload_json = payload.model_dump_json()
                 session.add(MatchHistoryImage(history_id=record.id,
                     content=customer_image.raw_bytes, mime_type=customer_image.mime_type))
                 session.commit()
         except SQLAlchemyError:
+            payload.history_id = None
             payload.message = (payload.message or '') + ' 本次历史记录保存失败，请保留当前结果。'
         return payload
 
+    @app.post('/api/feedback', status_code=201)
+    def submit_feedback(feedback: FeedbackRequest, request: Request):
+        reason = feedback.reason.strip()
+        if not feedback.helpful and not reason:
+            raise HTTPException(status_code=422, detail='请填写不合适的原因。')
+        try:
+            with application_session_factory() as session:
+                history = session.get(MatchHistory, feedback.history_id)
+                if history is None:
+                    raise HTTPException(status_code=404, detail='匹配记录不存在，请重新匹配后提交。')
+                if request.state.user['role'] != 'admin' and history.user_id != request.state.user['id']:
+                    raise HTTPException(status_code=403, detail='只能为自己的匹配记录提交反馈。')
+                record = MatchFeedback(history_id=feedback.history_id, helpful=feedback.helpful, reason=reason,
+                                       submitted_by=request.state.user['id'])
+                session.add(record)
+                session.flush()
+                feedback_id = record.id
+                session.commit()
+                return {'id': feedback_id, 'history_id': feedback.history_id}
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503, detail='反馈保存失败，请稍后重试。') from None
+
+    @app.get('/api/feedback')
+    def list_feedback(before: int | None = Query(None, ge=1), helpful: bool | None = None):
+        try:
+            with application_session_factory() as session:
+                stmt = select(MatchFeedback).order_by(MatchFeedback.id.desc()).limit(21)
+                if before is not None:
+                    stmt = stmt.where(MatchFeedback.id < before)
+                if helpful is not None:
+                    stmt = stmt.where(MatchFeedback.helpful == helpful)
+                rows = list(session.scalars(stmt))
+                users = {user.id: public_user(user) for user in session.scalars(select(UserAccount).where(
+                    UserAccount.id.in_([row.submitted_by for row in rows[:20] if row.submitted_by])))}
+                items = [{'id': row.id, 'history_id': row.history_id, 'helpful': row.helpful,
+                          'reason': row.reason, 'created_at': row.created_at.isoformat(),
+                          'submitted_by': users.get(row.submitted_by)} for row in rows[:20]]
+                return {'items': items, 'next_before': items[-1]['id'] if len(rows) > 20 else None}
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503, detail='反馈记录暂不可用，请稍后重试。') from None
+
     @app.get('/api/history')
-    def match_history(before: int | None = Query(None, ge=1)):
+    def match_history(before: int | None = Query(None, ge=1),
+                      period: Literal['all', 'today', '3d', '7d', '30d'] = 'all'):
         try:
             with application_session_factory() as session:
                 stmt = select(MatchHistory).order_by(MatchHistory.id.desc()).limit(21)
+                if period != 'all':
+                    days = {'today': 1, '3d': 3, '7d': 7, '30d': 30}[period]
+                    today = datetime.now(timezone(timedelta(hours=8))).replace(hour=0, minute=0, second=0, microsecond=0)
+                    stmt = stmt.where(MatchHistory.created_at >= today - timedelta(days=days - 1))
                 if before is not None:
                     stmt = stmt.where(MatchHistory.id < before)
                 rows = list(session.scalars(stmt))
                 image_ids = set(session.scalars(select(MatchHistoryImage.history_id).where(
                     MatchHistoryImage.history_id.in_([row.id for row in rows[:20]]))))
                 items = []
+                users = {user.id: public_user(user) for user in session.scalars(select(UserAccount).where(
+                    UserAccount.id.in_([row.user_id for row in rows[:20] if row.user_id])))}
                 for row in rows[:20]:
                     payload = json.loads(row.payload_json)
                     items.append({'id':row.id, 'created_at':row.created_at.isoformat(),
+                                  'user': users.get(row.user_id),
                                   'query_image_url':f'/api/history/{row.id}/image' if row.id in image_ids else None,
                                   'query_scene':payload.get('query_scene'),
                                   'result_count':len(payload.get('results',[]))})
@@ -293,7 +362,9 @@ def create_app(
                 if row is None:
                     raise HTTPException(status_code=404,detail='历史记录不存在。')
                 has_image = session.scalar(select(MatchHistoryImage.history_id).where(MatchHistoryImage.history_id == row.id))
+                user = session.get(UserAccount, row.user_id) if row.user_id else None
                 return {'id':row.id,'created_at':row.created_at.isoformat(),'payload':json.loads(row.payload_json),
+                        'user': public_user(user) if user else None,
                         'query_image_url':f'/api/history/{row.id}/image' if has_image else None}
         except SQLAlchemyError:
             raise HTTPException(status_code=503,detail='历史记录暂不可用。') from None
@@ -494,6 +565,8 @@ def create_app(
             path = (application_settings.project_root / record.stored_path).resolve()
             if not path.is_relative_to(application_settings.image_dir.resolve()):
                 raise HTTPException(status_code=400, detail="图片存储路径无效。")
+            # 场景标签表的外键没有级联删除，先清理关联记录再删除图片。
+            repository._session.query(SceneLabel).filter(SceneLabel.image_id == image_id).delete(synchronize_session=False)
             repository._session.delete(record)
             repository._session.commit()
             if path.is_file():
@@ -505,17 +578,21 @@ def create_app(
             repository._session.rollback()
             raise HTTPException(status_code=503, detail="图片删除失败，请稍后重试。") from None
 
-    def execute_search(data, filename, confirmed_scene, top_k):
+    @match_trace
+    def execute_search(data, filename, confirmed_scene, top_k, user_id):
         with application_session_factory() as session:
-            return search_sync(data, filename, confirmed_scene, top_k, ImageRepository(session))
+            return search_sync(data, filename, confirmed_scene, top_k, ImageRepository(session), user_id)
 
-    def search_sync(data, filename, confirmed_scene, top_k, repository):
+    def search_sync(data, filename, confirmed_scene, top_k, repository, user_id):
         try:
             if len(data) > MAX_UPLOAD_BYTES:
                 raise HTTPException(status_code=400, detail="上传图片不能超过 20 MiB。")
-            validated = validate_image_bytes(data, filename)
-            identity = application_encoder.identity
-            query = application_encoder.encode(validated.image)
+            with stage("image_validation"):
+                validated = validate_image_bytes(data, filename)
+            with stage("model_load"):
+                identity = application_encoder.identity
+            with stage("encode_including_gpu_wait"):
+                query = application_encoder.encode(validated.image)
             if confirmed_scene is not None:
                 try:
                     scene_labels = validate_labels(json.loads(confirmed_scene))
@@ -527,7 +604,7 @@ def create_app(
                 except SceneError:
                     scene_labels = None
             if not usable_scene(scene_labels):
-                return save_match(SearchResponse(model=_model_response(identity), results=[], message='场景识别不可用或关键属性无法确认，请在下方手动确认空间、沙发与地板后重新匹配。本次未放宽筛选。', query_scene=scene_labels), validated)
+                return save_match(SearchResponse(model=_model_response(identity), results=[], message='场景识别不可用或关键属性无法确认，请在下方手动确认空间、沙发与地板后重新匹配。本次未放宽筛选。', query_scene=scene_labels), validated, user_id)
             rows = repository.search_products(identity, query, top_k=top_k, scene_labels=scene_labels, scene_model=scene_client.model)
             review_notes = {}
             review_count = review_failures = 0
@@ -549,6 +626,7 @@ def create_app(
                 product_id=row.product_id,
                 matched_buyer_image_url=f"/api/images/{row.buyer_image_id}",
                 buyer_image_id=row.buyer_image_id,
+                style=_optional_text(row.style),
                 product_image_url=f"/api/images/{row.product_image_id}" if row.product_image_id else None,
                 matched_source_column=row.source_column,
                 similarity=row.similarity_percent,
@@ -564,10 +642,11 @@ def create_app(
             message += f' 已对 {review_count} 张高相似度冲突候选进行双图复核。'
         if review_failures:
             message += f' 其中 {review_failures} 张复核未完成，未将其放行；可重试。'
-        return save_match(SearchResponse(model=_model_response(identity), results=results, message=message, query_scene=scene_labels), validated)
+        return save_match(SearchResponse(model=_model_response(identity), results=results, message=message, query_scene=scene_labels), validated, user_id)
 
     @app.post("/api/search", response_model=SearchResponse)
     async def search(
+        request: Request,
         image: UploadFile = File(...),
         confirmed_scene: str | None = Form(None),
         top_k: int = Query(5, ge=1, le=50),
@@ -577,7 +656,7 @@ def create_app(
             async with search_semaphore:
                 data = await image.read(MAX_UPLOAD_BYTES + 1)
                 return await run_in_threadpool(
-                    execute_search, data, image.filename or "uploaded.png", confirmed_scene, top_k)
+                    execute_search, data, image.filename or "uploaded.png", confirmed_scene, top_k, request.state.user['id'])
         finally:
             await image.close()
 
@@ -590,6 +669,23 @@ def create_app(
     def frontend_styles() -> FileResponse:
         return FileResponse(application_frontend_root / "styles.css", media_type="text/css")
 
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/feedback", include_in_schema=False)
+    def feedback_page() -> FileResponse:
+        return FileResponse(application_frontend_root / "feedback.html", media_type="text/html")
+
+    @app.get("/admin.js", include_in_schema=False)
+    def admin_script() -> FileResponse:
+        return FileResponse(application_frontend_root / "admin.js", media_type="text/javascript")
+
+    @app.get("/feedback.js", include_in_schema=False)
+    def feedback_script() -> FileResponse:
+        return FileResponse(application_frontend_root / "feedback.js", media_type="text/javascript")
+
+    @app.get("/feedback.css", include_in_schema=False)
+    def feedback_styles() -> FileResponse:
+        return FileResponse(application_frontend_root / "feedback.css", media_type="text/css")
+
     @app.get("/matcher-core.js", include_in_schema=False)
     def frontend_matcher_core() -> FileResponse:
         return FileResponse(application_frontend_root / "matcher-core.js", media_type="text/javascript")
@@ -601,6 +697,10 @@ def create_app(
     @app.get("/app.js", include_in_schema=False)
     def frontend_app() -> FileResponse:
         return FileResponse(application_frontend_root / "app.js", media_type="text/javascript")
+
+    @app.get('/orders.js', include_in_schema=False)
+    def order_script():
+        return FileResponse(application_frontend_root / 'orders.js', media_type='text/javascript')
 
     return app
 

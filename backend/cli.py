@@ -37,6 +37,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="本地图像向量建库与相似检索工具")
     commands = parser.add_subparsers(dest="command", required=True, title="子命令")
     commands.add_parser("init-db", help="创建数据库、vector 扩展和表结构")
+    account = commands.add_parser('create-user', help='本机开通账号（交互输入密码）')
+    account.add_argument('username')
+    account.add_argument('--name', required=True, help='显示姓名')
+    account.add_argument('--role', choices=['admin', 'customer_service'], default='customer_service')
+    reset = commands.add_parser('reset-password', help='本机重置密码并使旧登录失效')
+    reset.add_argument('username')
     import_parser = commands.add_parser("import", help="导入图片文件或目录")
     import_parser.add_argument("path", type=Path, help="图片文件或包含图片的目录")
     search_parser = commands.add_parser("search", help="按查询图片检索相似结果")
@@ -56,6 +62,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             create_database_and_schema(Settings.load())
             print("数据库和表结构已初始化。")
             return 0
+        if args.command in ('create-user', 'reset-password'):
+            return _manage_account(args)
         if args.command == "import":
             return _run_import(args.path)
         if args.command == "search":
@@ -66,6 +74,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("命令执行失败，请检查配置、数据库连接和输入文件。")
         return 1
     return 1
+
+
+def _manage_account(args):
+    from getpass import getpass
+    from sqlalchemy import select, delete
+    from sqlalchemy.exc import IntegrityError
+    from backend.auth import create_user, hash_password
+    from backend.models import UserAccount, LoginSession
+    password = getpass('Password (6-128 characters): ')
+    if password != getpass('Confirm password: '):
+        print('两次密码不一致，未修改账号。')
+        return 1
+    factory = create_session_factory(Settings.load())
+    try:
+        with factory() as session:
+            if args.command == 'create-user':
+                create_user(session, args.username, args.name, password, args.role)
+            else:
+                user = session.scalar(select(UserAccount).where(UserAccount.username == args.username.strip().lower()))
+                if user is None:
+                    print('账号不存在。')
+                    return 1
+                user.password_hash = hash_password(password)
+                session.execute(delete(LoginSession).where(LoginSession.user_id == user.id))
+            session.commit()
+        print('账号已保存。')
+        return 0
+    except ValueError as error:
+        print(str(error))
+        return 1
+    except IntegrityError:
+        print('账号已存在，未覆盖。')
+        return 1
+    finally:
+        dispose_session_factory(factory)
 
 
 def _run_import(path: Path) -> int:
@@ -104,7 +147,7 @@ def _run_server(host: str, port: int) -> int:
     """延迟委托给 Uvicorn，避免帮助和其他命令导入未来的 API 路由。"""
     import uvicorn
 
-    uvicorn.run("backend.api:app", host=host, port=port)
+    uvicorn.run("backend.api:app", host=host, port=port, proxy_headers=False)
     return 0
 
 

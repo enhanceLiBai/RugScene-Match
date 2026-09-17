@@ -28,7 +28,10 @@
       }
     }
 
-    if (!response.ok) throw new ApiError(payload?.detail || GENERIC_ERROR);
+    if (response.status === 401 && root.location) {
+      root.location.replace(['/admin', '/feedback'].includes(root.location.pathname) ? '/admin/login' : '/login');
+    }
+    if (!response.ok) throw new ApiError(typeof payload?.detail === 'string' ? payload.detail : GENERIC_ERROR);
     if (!isJson) throw new ApiError(GENERIC_ERROR);
     return payload;
   }
@@ -92,7 +95,10 @@
       });
     }
     const importStatus = (jobId) => requestJson(fetcher, `/api/imports/${encodeURIComponent(jobId)}`, { method: 'GET' });
-    return { listLibrary, uploadLibraryImage, searchSimilar, deleteLibraryImage, uploadWorkbook, importStatus };
+    const submitFeedback = (feedback) => requestJson(fetcher, '/api/feedback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(feedback),
+    });
+    return { listLibrary, uploadLibraryImage, searchSimilar, deleteLibraryImage, uploadWorkbook, importStatus, submitFeedback };
   }
 
   return { ApiError, requestJson, create };

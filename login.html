@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>登录 · 买家秀匹配</title><link rel="stylesheet" href="/styles.css"></head>
+<body>
+  <header class="topbar"><div><p class="eyebrow">CARPET MATCHER</p><h1 id="loginTitle">客服登录</h1></div></header>
+  <main style="max-width:520px">
+    <form id="loginForm" class="panel entry-form">
+      <h2>欢迎回来</h2><p class="hint">账号由管理员统一开通，请使用分配给本人的账号登录。</p>
+      <label>账号<input id="username" name="username" autocomplete="username" maxlength="40" required></label>
+      <label>密码<input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <button id="loginSubmit" class="primary" type="submit">登录</button>
+      <p id="loginStatus" class="status-message" aria-live="polite"></p>
+    </form>
+    <p><a id="otherLogin" href="/admin/login">管理员登录（仅内网）</a></p>
+  </main>
+  <script src="/login.js"></script>
+</body></html>

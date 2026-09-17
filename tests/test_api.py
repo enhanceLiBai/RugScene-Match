@@ -43,15 +43,33 @@ class FailingEncoder(FakeEncoder):
         raise RuntimeError("internal encoder failure")
 
 
+@pytest.fixture(autouse=True)
+def api_test_identity(request, monkeypatch):
+    """本模块验证业务接口，登录验证另由 test_auth.py 覆盖。"""
+    from backend import auth
+    from backend.models import UserAccount
+    user = {'id': 0, 'username': 'api-test', 'display_name': '接口测试', 'role': 'admin'}
+    if 'api_session_factory' in request.fixturenames:
+        factory = request.getfixturevalue('api_session_factory')
+        with factory() as session:
+            record = UserAccount(username='test_' + uuid.uuid4().hex, display_name='接口测试',
+                                 password_hash='unused-in-business-tests', role='admin')
+            session.add(record)
+            session.flush()
+            user['id'] = record.id
+            session.commit()
+    monkeypatch.setattr(auth, 'resolve_user', lambda *_args: user)
+
+
 def test_match_history_snapshot(client, monkeypatch, api_settings, api_session_factory, fake_encoder, frontend_root):
     from backend.scene import SceneClient
     from backend.repository import ProductSearchRow
 
-    tags = dict(room="客厅", sofa_status="present", sofa_color="米白",
-                floor_status="present", floor_color="灰色", floor_material="瓷砖")
+    tags = dict(room="客厅", sofa_status="present", sofa_color="米色",
+                floor_status="present", floor_color="浅灰色", floor_material="瓷砖/石材")
     monkeypatch.setattr(SceneClient, "identify", lambda self, image: tags)
     monkeypatch.setattr(ImageRepository, "search_products", lambda *args, **kwargs: [
-        ProductSearchRow("history-product", 1, 2, "J", 92.5, tags)
+        ProductSearchRow("history-product", 1, 2, "J", 92.5, tags, "云纹米色")
     ])
     response = client.post("/api/search", files={"image": ("private-customer.png", png_bytes(), "image/png")})
     assert response.status_code == 200
@@ -61,13 +79,14 @@ def test_match_history_snapshot(client, monkeypatch, api_settings, api_session_f
     assert record["query_scene"] == tags
     detail = client.get(f'/api/history/{record["id"]}')
     assert detail.json()["payload"] == response.json()
+    assert detail.json()["payload"]["results"][0]["style"] == "云纹米色"
     assert "private-customer" not in detail.text
     assert not list(api_settings.image_dir.glob("*"))
     image_url = detail.json()["query_image_url"]
     assert record["query_image_url"] == image_url
     # 新应用实例读取同一数据库，验证照片不依赖请求内存或客户端预览。
     with TestClient(create_app(settings=api_settings, encoder=fake_encoder,
-                              session_factory=api_session_factory, frontend_root=frontend_root)) as reopened:
+                              session_factory=api_session_factory, frontend_root=frontend_root), client=("127.0.0.1", 50000)) as reopened:
         photo = reopened.get(image_url)
         assert photo.status_code == 200
         assert photo.headers["content-type"] == "image/png"
@@ -239,6 +258,8 @@ def frontend_root(tmp_path: Path) -> Path:
     (root / "matcher-core.js").write_text("export const matcher = {};", encoding="utf-8")
     (root / "api-client.js").write_text("export const api = {};", encoding="utf-8")
     (root / "app.js").write_text("export const app = {};", encoding="utf-8")
+    for name in ("feedback.html", "feedback.js", "feedback.css", "admin.js", "login.html", "login.js", "auth-client.js", "orders.js"):
+        (root / name).write_text((Path(__file__).parents[1] / name).read_text(encoding="utf-8"), encoding="utf-8")
     (root / "not-registered.env").write_text("SECRET=not-served", encoding="utf-8")
     return root
 
@@ -257,7 +278,7 @@ def client(
         session_factory=api_session_factory,
         frontend_root=frontend_root,
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
         yield test_client
 
 
@@ -401,7 +422,7 @@ def test_library_upload_maps_service_failure_to_503(
         session_factory=api_session_factory,
         frontend_root=frontend_root,
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
         response = test_client.post(
             "/api/library",
             files={"image": ("buyer.png", png_bytes(), "image/png")},
@@ -545,8 +566,19 @@ def test_root_serves_frontend_and_only_registered_assets(client: TestClient) -> 
     assert '<script src="api-client.js"></script>' in html
     assert 'id="seedButton"' not in html
     assert 'id="clearButton"' not in html
-    assert 'id="entryStatus"' in html
-    assert 'id="reloadLibraryButton"' in html
+    assert 'id="entryStatus"' not in html
+    assert 'id="reloadLibraryButton"' not in html
+    assert 'id="historyList"' not in html
+    assert 'id="matchButton"' in html
+    admin = client.get('/admin')
+    assert admin.status_code == 200
+    assert 'id="entryStatus"' in admin.text
+    assert 'id="reloadLibraryButton"' in admin.text
+    assert 'id="historyList"' in admin.text
+    assert 'id="feedbackList"' in admin.text
+    assert 'id="matchButton"' not in admin.text
+    assert client.get('/feedback').text == admin.text
+    assert client.get('/admin.js').status_code == 200
     assert client.get("/styles.css").headers["content-type"].startswith("text/css")
     assert client.get("/matcher-core.js").status_code == 200
     assert client.get("/api-client.js").status_code == 200
@@ -562,7 +594,7 @@ def test_default_frontend_root_is_independent_from_library_project_root(
     """若默认静态根跟随临时图库根，正常部署的首页会错误返回缺失。"""
     app = create_app(settings=api_settings, encoder=fake_encoder, session_factory=api_session_factory)
 
-    with TestClient(app) as test_client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
         response = test_client.get("/")
 
     assert response.status_code == 200
@@ -586,7 +618,7 @@ def test_database_error_returns_503_without_connection_details(api_settings: Set
         raise SQLAlchemyError("postgresql://user:secret@host/db")
 
     app = create_app(settings=api_settings, encoder=fake_encoder, session_factory=unavailable_session_factory)
-    with TestClient(app) as test_client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
         response = test_client.get("/health")
 
     assert response.status_code == 503
@@ -612,7 +644,7 @@ def import_client(tmp_path, monkeypatch):
 
     app = create_app(settings=settings, encoder=ImportEncoder(), session_factory=lambda: session,
                      import_runner=runner)
-    with TestClient(app) as test_client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as test_client:
         yield test_client, settings, session
 
 
@@ -691,3 +723,104 @@ def test_import_upload_database_failure_cleans_files_without_exposing_error(impo
     assert "secret" not in response.text
     assert not list(settings.import_job_dir.iterdir())
     assert not session.state["jobs"]
+
+
+def test_feedback_submission_and_admin_history(client, monkeypatch, api_settings, api_session_factory, fake_encoder, frontend_root):
+    from backend.scene import SceneClient
+    from backend.repository import ProductSearchRow
+    from backend.models import MatchFeedback
+
+    tags = dict(room="客厅", sofa_status="present", sofa_color="米色",
+                floor_status="present", floor_color="浅灰色", floor_material="瓷砖/石材")
+    monkeypatch.setattr(SceneClient, "identify", lambda self, image: tags)
+    monkeypatch.setattr(ImageRepository, "search_products", lambda *args, **kwargs: [
+        ProductSearchRow("feedback-product", 1, 2, "L", 92.5, tags)
+    ])
+    response = client.post('/api/search', files={'image': ('customer.png', png_bytes(), 'image/png')})
+    assert response.status_code == 200
+    payload = response.json()
+    history_id = payload['history_id']
+    assert history_id
+    assert client.get(f'/api/history/{history_id}').json()['payload'] == payload
+    body = {'history_id': history_id, 'helpful': False, 'reason': '  沙发颜色不一致  '}
+    assert client.post('/api/feedback', json={**body, 'reason': '  '}).status_code == 422
+    assert client.post('/api/feedback', json={**body, 'history_id': 9223372036854775807}).status_code == 404
+    saved = client.post('/api/feedback', json=body)
+    assert saved.status_code == 201
+    feedback_id = saved.json()['id']
+    with api_session_factory() as session:
+        row = session.get(MatchFeedback, feedback_id)
+        assert row.history_id == history_id
+        assert row.helpful is False
+        assert row.reason == '沙发颜色不一致'
+    assert client.post('/api/feedback', json={'history_id': history_id, 'helpful': True}).status_code == 201
+    with TestClient(create_app(settings=api_settings, encoder=fake_encoder,
+                              session_factory=api_session_factory, frontend_root=frontend_root), client=("127.0.0.1", 50000)) as reopened:
+        items = reopened.get('/api/feedback?helpful=false').json()['items']
+        assert all(item['helpful'] is False for item in items)
+        feedback = next(item for item in items if item['id'] == feedback_id)
+        assert feedback['reason'] == '沙发颜色不一致'
+        detail = reopened.get(f'/api/history/{feedback["history_id"]}').json()
+        assert detail['payload'] == payload
+        assert reopened.get(detail['query_image_url']).content == png_bytes()
+        assert reopened.get('/feedback').status_code == 200
+        assert 'feedbackList' in reopened.get('/feedback').text
+        assert reopened.get('/feedback.js').status_code == 200
+        assert reopened.get('/feedback.css').status_code == 200
+    # 管理列表游标翻页不会漏掉同一次匹配的多份反馈。
+    with api_session_factory() as session:
+        session.add_all([MatchFeedback(history_id=history_id, helpful=False, reason=f'原因 {i}') for i in range(21)])
+        session.commit()
+    first = client.get('/api/feedback?helpful=false').json()
+    assert len(first['items']) == 20
+    second = client.get(f'/api/feedback?helpful=false&before={first["next_before"]}').json()
+    assert first['next_before']
+    assert set(item['id'] for item in first['items']).isdisjoint(item['id'] for item in second['items'])
+    assert feedback_id in [item['id'] for item in second['items']]
+
+
+def test_search_returns_optional_style(client, monkeypatch):
+    from backend.scene import SceneClient
+    tags = dict(room='客厅', sofa_status='present', sofa_color='米色',
+                floor_status='present', floor_color='浅灰色', floor_material='瓷砖/石材')
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'test-placeholder')
+    monkeypatch.setattr(SceneClient, 'identify', lambda self, image: tags)
+    expected = {}
+    for color, style in [('#913245', '  云纹米色  '), ('#284563', '')]:
+        uploaded = client.post('/api/library', data={'style': style},
+                               files={'image': ('style.png', png_bytes(color), 'image/png')})
+        assert uploaded.status_code == 200
+        expected[uploaded.json()['image']['id']] = style.strip() or None
+    response = client.post('/api/search?top_k=50', files={'image': ('query.png', png_bytes(), 'image/png')})
+    assert response.status_code == 200
+    payload = response.json()
+    rows = {row['buyer_image_id']: row for row in payload['results']}
+    for image_id, style in expected.items():
+        assert rows[image_id]['style'] == style
+    # 快照持久化由 test_match_history_snapshot 使用非嵌套会话验证；
+    # 本测试的共享连接会在真实检索会话关闭时回滚内部保存点。
+
+
+def test_history_time_filter(client, api_session_factory, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from backend import api
+    from backend.models import MatchHistory
+    today = datetime(2099, 6, 15, tzinfo=timezone(timedelta(hours=8)))
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (today + timedelta(hours=12)).astimezone(tz)
+    monkeypatch.setattr(api, 'datetime', Clock)
+    with api_session_factory() as session:
+        records = [MatchHistory(payload_json='{"results":[]}', created_at=today-timedelta(days=days)) for days in (0, 2, 6, 29, 30)]
+        session.add_all(records)
+        session.flush()
+        ids = [row.id for row in records]
+        session.commit()
+    for period, expected in [('today', ids[:1]), ('3d', ids[:2]), ('7d', ids[:3]), ('30d', ids[:4])]:
+        response = client.get('/api/history', params={'period': period})
+        assert response.status_code == 200
+        assert {row['id'] for row in response.json()['items']} == set(expected)
+    page = client.get('/api/history', params={'period': '7d', 'before': ids[2]}).json()
+    assert {row['id'] for row in page['items']} == set(ids[:2])
+    assert client.get('/api/history?period=invalid').status_code == 422
