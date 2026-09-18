@@ -31,6 +31,9 @@
     if (response.status === 401 && root.location) {
       root.location.replace(['/admin', '/feedback'].includes(root.location.pathname) ? '/admin/login' : '/login');
     }
+    if (!isJson && [502, 503, 504, 520, 521, 522, 523, 524, 530].includes(response.status)) {
+      throw new ApiError(`访问链路或网关暂不可用（HTTP ${response.status}），请稍后重试；若刚才已提交匹配，可先查看历史记录。`);
+    }
     if (!response.ok) throw new ApiError(typeof payload?.detail === 'string' ? payload.detail : GENERIC_ERROR);
     if (!isJson) throw new ApiError(GENERIC_ERROR);
     return payload;
@@ -41,7 +44,7 @@
       && (typeof value !== 'string' || value.trim() !== '');
   }
 
-  function create({ fetchImpl, FormDataImpl } = {}) {
+  function create({ fetchImpl, FormDataImpl, searchTimeoutMs = 180000 } = {}) {
     const fetcher = fetchImpl || (typeof root.fetch === 'function' ? root.fetch.bind(root) : null);
     const FormDataClass = FormDataImpl || root.FormData;
     if (!fetcher) throw new Error('缺少 fetch 实现。');
@@ -64,10 +67,18 @@
       const body = new FormDataClass();
       body.append('image', file);
       if (confirmedScene) body.append('confirmed_scene', JSON.stringify(confirmedScene));
-      return requestJson(fetcher, `/api/search?top_k=${encodeURIComponent(topK)}`, {
-        method: 'POST',
-        body,
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), searchTimeoutMs);
+      try {
+        return await requestJson(fetcher, `/api/search?top_k=${encodeURIComponent(topK)}`, {
+          method: 'POST', body, signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) throw new ApiError('检索请求超时，请检查网络后重试；本次后台处理可能仍在继续，可先查看历史记录。');
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     async function deleteLibraryImage(imageId) {

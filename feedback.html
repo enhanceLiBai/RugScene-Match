@@ -71,7 +71,8 @@
           <aside class="panel library-list">
             <div class="panel-heading">
               <div><p class="section-label">图库列表</p><h3>已入库买家秀（<span id="libraryCount">0</span>）</h3></div>
-              <button id="reloadLibraryButton" class="retry-button" type="button">刷新图库</button>
+                <a href="/admin/library" target="_blank" rel="noopener">大图清洗页面 ↗</a>
+                <button id="reloadLibraryButton" class="retry-button" type="button">刷新图库</button>
             </div>
             <p class="status-message" id="libraryStatus" aria-live="polite" hidden></p>
             <div id="libraryGrid" class="library-grid"></div>
@@ -83,6 +84,8 @@
           <h3>历史匹配记录</h3>
           <p>当前为团队共享记录。保存客户照片、当次场景标签与推荐结果，可打开记录进行对照。旧记录若未保存客户照片，将无法补回。</p>
           <div class="feedback-toolbar">
+            <label for="historyCustomer">客服</label>
+            <select id="historyCustomer"><option value="">全部</option></select>
             <label for="historyPeriod">时间范围</label>
             <select id="historyPeriod"><option value="all">全部</option><option value="today">今天</option><option value="3d">近三天</option><option value="7d">近七天</option><option value="30d">1个月内</option></select>
             <button id="historyRefresh" class="ghost" type="button">刷新记录</button>

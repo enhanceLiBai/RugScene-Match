@@ -11,7 +11,8 @@ async function loadAdminHistory(more = false) {
   const moreButton = document.querySelector('#historyMore');
   const list = document.querySelector('#historyList');
   const period = document.querySelector('#historyPeriod');
-  refresh.disabled = moreButton.disabled = period.disabled = true;
+  const customer = document.querySelector('#historyCustomer');
+  refresh.disabled = moreButton.disabled = customer.disabled = period.disabled = true;
   status.textContent = '正在读取历史记录…';
   if (!more) {
     adminHistoryCursor = null;
@@ -21,7 +22,20 @@ async function loadAdminHistory(more = false) {
     document.querySelector('#historyDetail').hidden = true;
   }
   try {
+    if (!more) {
+      const accounts = await feedbackJson('/api/accounts');
+      const selected = customer.value;
+      customer.replaceChildren(feedbackNode('option', '全部'));
+      customer.children[0].value = '';
+      for (const user of accounts.items.filter(user => user.role === 'customer_service')) {
+        const option = feedbackNode('option', `${user.display_name}（${user.username}）`);
+        option.value = String(user.id);
+        customer.append(option);
+      }
+      customer.value = selected;
+    }
     const params = new URLSearchParams();
+    if (customer.value) params.set('customer_id', customer.value);
     if (period.value && period.value !== 'all') params.set('period', period.value);
     if (more && adminHistoryCursor) params.set('before', adminHistoryCursor);
     const data = await feedbackJson('/api/history' + (params.size ? `?${params}` : ''));
@@ -57,11 +71,11 @@ async function loadAdminHistory(more = false) {
     adminHistoryCursor = data.next_before;
     adminHistoryLoaded = true;
     moreButton.hidden = !adminHistoryCursor;
-    status.textContent = list.children.length ? '' : '所选时间范围内暂无匹配记录。';
+    status.textContent = list.children.length ? '' : '所选条件下暂无匹配记录。';
   } catch (error) { status.textContent = error.message || '读取失败，请刷新重试。'; }
   finally {
     adminHistoryLoading = false;
-    refresh.disabled = moreButton.disabled = period.disabled = false;
+    refresh.disabled = moreButton.disabled = customer.disabled = period.disabled = false;
   }
 }
 
@@ -78,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.querySelector('#historyRefresh').onclick = () => loadAdminHistory();
   document.querySelector('#historyMore').onclick = () => loadAdminHistory(true);
+  document.querySelector('#historyCustomer').onchange = () => loadAdminHistory();
   document.querySelector('#historyPeriod').onchange = () => loadAdminHistory();
   document.querySelector('#refreshAccounts').onclick = loadAccounts;
   document.querySelector('#accountForm').onsubmit = async (event) => {

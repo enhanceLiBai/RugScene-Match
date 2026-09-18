@@ -106,3 +106,26 @@ test('客服个人历史打开原照片与原排名，可在原记录补登记',
   assert.equal(p.nodes['#queryImage'].value, '');
   assert.equal(p.nodes['#matchButton'].disabled, false);
 });
+
+
+test('历史客服下拉筛选与时间、翻页同时生效', async () => {
+  const p = page('feedback.html', ['app.js', 'feedback.js', 'admin.js']);
+  await new Promise(resolve => setImmediate(resolve));
+  p.context.CarpetApiClient.requestJson = async (_fetch, url) => {
+    p.calls.push(url);
+    if (url === '/api/accounts') return {items: [{id: 7, role: 'customer_service', display_name: '小王', username: 'wang'}, {id: 8, role: 'admin'}]};
+    return {items: [], next_before: 123};
+  };
+  await p.nodes['#historyRefresh'].onclick();
+  assert.equal(p.nodes['#historyCustomer'].children.length, 2);
+  assert.equal(p.nodes['#historyCustomer'].children[1].textContent, '小王（wang）');
+  p.nodes['#historyCustomer'].value = '7';
+  p.nodes['#historyPeriod'].value = 'today';
+  await p.nodes['#historyCustomer'].onchange();
+  assert.equal(p.calls.at(-1), '/api/history?customer_id=7&period=today');
+  await p.nodes['#historyMore'].onclick();
+  assert.equal(p.calls.at(-1), '/api/history?customer_id=7&period=today&before=123');
+  p.nodes['#historyCustomer'].value = '';
+  await p.nodes['#historyCustomer'].onchange();
+  assert.equal(p.calls.at(-1), '/api/history?period=today');
+});

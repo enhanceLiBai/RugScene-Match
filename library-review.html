@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>大图清洗 · 买家秀图库</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f3ec; color: #24352e; font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1400px; margin: 24px auto; padding: 0 24px; }
+    header { position: sticky; top: 0; z-index: 1; background: #fffefb; padding: 18px 24px; border: 1px solid #e3e0d6; border-radius: 14px; }
+    .toolbar, .paging { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .toolbar h1 { margin: 0 auto 0 0; font-size: 23px; }
+    a { color: #375e4e; }
+    button { font: inherit; background: white; color: #345144; border: 1px solid #8b9b90; border-radius: 6px; padding: 8px 16px; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    .hint { color: #777d73; font-size: 14px; margin: 8px 0; }
+    #status { margin: 6px 0; color: #a23c29; }
+    .list { background: #fffefb; padding: 0 24px; border: 1px solid #e3e0d6; border-radius: 14px; margin-top: 18px; }
+    article { display: grid; grid-template-columns: minmax(0, 3fr) minmax(220px, 1fr); gap: 30px; padding: 26px 0; border-bottom: 1px solid #e3e0d6; }
+    article:last-child { border-bottom: 0; }
+    .photo { display: block; background: #f1efe8; border-radius: 8px; overflow: hidden; }
+    .photo img { display: block; width: 100%; height: min(78vh, 850px); object-fit: contain; }
+    h2 { font-size: 19px; margin: 4px 0 12px; overflow-wrap: anywhere; }
+    .details p { overflow-wrap: anywhere; margin: 8px 0; }
+    .delete { color: #b3432d; border-color: #d3aa9e; margin-top: 20px; }
+    footer { padding: 24px 0 40px; }
+    input { width: 76px; font: inherit; padding: 5px; }
+    @media(max-width: 700px) { main { padding: 0 10px; margin-top: 10px; } header { position: static; padding: 16px; } article { grid-template-columns: 1fr; gap: 12px; } .list { padding: 0 14px; } .photo img { height: 65vh; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="toolbar"><h1>已入库买家秀（<span id="count">—</span>）</h1><a href="/admin">返回后台</a><button id="refresh">刷新图库</button></div>
+    <p class="hint">大图完整展示，点击图片可打开原图。删除不可撤销，历史记录中的对应图片也将无法打开。</p>
+    <div class="paging"><button id="prev">上一页</button><span id="position"></span><button id="next">下一页</button><label>跳至 <input id="page" type="number" min="1" value="1" aria-label="页码"> 页</label><button id="jump">跳转</button></div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </header>
+  <div id="list" class="list"></div>
+  <footer class="paging"><button id="bottomNext">下一页</button><span class="hint">每页 20 张，按图库原有顺序浏览。</span></footer>
+</main>
+<script src="/api-client.js"></script>
+<script src="/matcher-core.js"></script>
+<script>
+  const api = CarpetApiClient.create();
+  const $ = id => document.getElementById(id);
+  const size = 20;
+  let images = [], page = Math.max(1, Number(new URLSearchParams(location.search).get('page')) || 1), busy = false;
+  const pages = () => Math.max(1, Math.ceil(images.length / size));
+  function controls() {
+    $('count').textContent = images.length;
+    $('position').textContent = `第 ${page} / ${pages()} 页`;
+    $('page').value = page;
+    $('page').max = pages();
+    $('prev').disabled = busy || page <= 1;
+    $('next').disabled = $('bottomNext').disabled = busy || page >= pages();
+    $('refresh').disabled = $('jump').disabled = busy;
+    document.querySelectorAll('.delete').forEach(button => button.disabled = busy);
+  }
+  function render() {
+    page = Math.min(pages(), Math.max(1, Math.floor(page)));
+    history.replaceState(null, '', `?page=${page}`);
+    $('list').replaceChildren();
+    for (const item of images.slice((page - 1) * size, page * size)) {
+      const view = CarpetMatcherCore.buildPresentation(item);
+      const card = document.createElement('article');
+      const link = document.createElement('a');
+      link.className = 'photo'; link.href = item.image_url; link.target = '_blank'; link.rel = 'noopener';
+      const image = document.createElement('img');
+      image.src = item.image_url; image.alt = view.productName; image.loading = 'lazy'; image.decoding = 'async';
+      image.onerror = () => { image.alt = '图片加载失败，可点击打开原图或刷新重试'; };
+      link.append(image);
+      const details = document.createElement('div'); details.className = 'details';
+      const title = document.createElement('h2'); title.textContent = view.productName; details.append(title);
+      for (const text of [`图片编号：${item.id}`, `SKU：${view.sku}`, view.chips.join(' · ') || '元数据未填写', `尺寸：${item.width} × ${item.height}`]) {
+        const line = document.createElement('p'); line.textContent = text; details.append(line);
+      }
+      const remove = document.createElement('button'); remove.className = 'delete'; remove.textContent = '从图库删除';
+      remove.onclick = async () => {
+        if (busy || !confirm(`确定删除图片 #${item.id}「${view.productName}」？\n删除不可撤销，历史记录中的对应图片也将无法打开。`)) return;
+        busy = true; controls(); $('status').textContent = '正在删除…';
+        try {
+          await api.deleteLibraryImage(item.id);
+          images = images.filter(value => value.id !== item.id);
+          const scroll = window.scrollY;
+          render();
+          window.scrollTo(0, scroll);
+          $('status').textContent = `已删除图片 #${item.id}。`;
+        } catch (error) { $('status').textContent = error.message || '删除失败，请重试。'; }
+        finally { busy = false; controls(); }
+      };
+      details.append(remove); card.append(link, details); $('list').append(card);
+    }
+    if (!images.length) $('list').textContent = '图库暂无图片。';
+    controls();
+  }
+  async function load() {
+    if (busy) return;
+    busy = true; controls(); $('status').textContent = '正在读取图库…';
+    try { images = (await api.listLibrary()).images || []; render(); $('status').textContent = ''; }
+    catch (error) { $('status').textContent = error.message || '读取失败，请刷新重试。'; }
+    finally { busy = false; controls(); }
+  }
+  function go(value) { if (busy) return; page = Number(value) || 1; render(); window.scrollTo(0, 0); }
+  $('prev').onclick = () => go(page - 1);
+  $('next').onclick = $('bottomNext').onclick = () => go(page + 1);
+  $('jump').onclick = () => go($('page').value);
+  $('page').onkeydown = event => { if (event.key === 'Enter') go($('page').value); };
+  $('refresh').onclick = load;
+  load();
+</script>
+</body>
+</html>

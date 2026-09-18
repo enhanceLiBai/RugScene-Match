@@ -3,6 +3,12 @@ const assert = require('node:assert/strict');
 
 const { CarpetApiClient } = require('../api-client.js');
 
+test('检索网络无响应时超时退出，允许页面恢复按钮', async () => {
+  const client = CarpetApiClient.create({searchTimeoutMs: 10, fetchImpl: (_url, {signal}) =>
+    new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted'))))});
+  await assert.rejects(client.searchSimilar(new Blob(['image'])), /检索请求超时/);
+});
+
 function jsonResponse(payload, { ok = true, status = 200 } = {}) {
   return {
     ok,
@@ -93,6 +99,6 @@ test('非 JSON 错误转换为稳定中文消息', async () => {
 
   await assert.rejects(
     client.listLibrary(),
-    (error) => error.name === 'ApiError' && error.message === '服务响应异常，请稍后重试。',
+    (error) => error.name === 'ApiError' && error.message.includes('访问链路或网关暂不可用（HTTP 502）'),
   );
 });

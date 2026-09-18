@@ -49,7 +49,6 @@ def preview_bytes(path: str, modified_ns: int) -> bytes:
         output = BytesIO()
         image.save(output, format="JPEG", quality=88, optimize=True)
         return output.getvalue()
-from backend.matching import review_conflicts
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -125,6 +124,8 @@ class SearchResultResponse(BaseModel):
 
 
 class ProductSearchResponse(BaseModel):
+    ranking_score: float | None = None
+    ranking_reasons: list[str] = Field(default_factory=list)
     rank: int
     product_id: str | None
     matched_buyer_image_url: str
@@ -327,10 +328,13 @@ def create_app(
 
     @app.get('/api/history')
     def match_history(before: int | None = Query(None, ge=1),
-                      period: Literal['all', 'today', '3d', '7d', '30d'] = 'all'):
+                      period: Literal['all', 'today', '3d', '7d', '30d'] = 'all',
+                      customer_id: int | None = Query(None, ge=1)):
         try:
             with application_session_factory() as session:
                 stmt = select(MatchHistory).order_by(MatchHistory.id.desc()).limit(21)
+                if customer_id is not None:
+                    stmt = stmt.where(MatchHistory.user_id == customer_id)
                 if period != 'all':
                     days = {'today': 1, '3d': 3, '7d': 7, '30d': 30}[period]
                     today = datetime.now(timezone(timedelta(hours=8))).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -605,23 +609,17 @@ def create_app(
                     scene_labels = None
             if not usable_scene(scene_labels):
                 return save_match(SearchResponse(model=_model_response(identity), results=[], message='场景识别不可用或关键属性无法确认，请在下方手动确认空间、沙发与地板后重新匹配。本次未放宽筛选。', query_scene=scene_labels), validated, user_id)
-            rows = repository.search_products(identity, query, top_k=top_k, scene_labels=scene_labels, scene_model=scene_client.model)
-            review_notes = {}
-            review_count = review_failures = 0
-            # 人工明确确认的标签保持硬约束，不由二次模型覆盖。
-            if confirmed_scene is None:
-                visual_candidates = repository.search_products(identity, query, top_k=20,
-                    scene_labels=scene_labels, scene_model=scene_client.model, filter_scene=False)
-                rows, review_notes, review_count, review_failures = review_conflicts(
-                    application_settings, repository, scene_client, validated.image, scene_labels,
-                    rows, visual_candidates, top_k)
+            rows = repository.search_products(identity, query, top_k=10, scene_labels=scene_labels, scene_model=scene_client.model)
         except InvalidImageError as error:
             raise HTTPException(status_code=400, detail="图片无效或格式不受支持。") from error
         except SQLAlchemyError as error:
             raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
 
+        from backend.ranking import rerank
+        ranked = rerank(application_settings, repository, scene_client, validated.image, rows, top_k)
         results = [
             ProductSearchResponse(
+                ranking_score=ranking_score, ranking_reasons=ranking_reasons,
                 rank=rank,
                 product_id=row.product_id,
                 matched_buyer_image_url=f"/api/images/{row.buyer_image_id}",
@@ -633,15 +631,10 @@ def create_app(
                 scene_labels=row.scene_labels,
                 matched_buyer_download_url=f"/api/images/{row.buyer_image_id}?download=1",
                 product_download_url=f"/api/images/{row.product_image_id}?download=1" if row.product_image_id else None,
-                match_explanation=review_notes.get(row.buyer_image_id),
             )
-            for rank, row in enumerate(rows, start=1)
+            for rank, (row, ranking_score, ranking_reasons) in enumerate(ranked, start=1)
         ]
-        message = '按空间、沙发与地板属性筛选，同灰色系允许深浅差异，通过后按图片相似度排序。' if results else '暂无通过属性筛选或双图复核的买家秀；请核对标签或补充图库。'
-        if review_count:
-            message += f' 已对 {review_count} 张高相似度冲突候选进行双图复核。'
-        if review_failures:
-            message += f' 其中 {review_failures} 张复核未完成，未将其放行；可重试。'
+        message = '按空间、沙发与地板属性筛选，同灰色系允许深浅差异，通过后按原始相似度加构图与整体色调调整后的实验分排序。' if results else '暂无通过场景硬筛的买家秀；请核对标签或补充图库。'
         return save_match(SearchResponse(model=_model_response(identity), results=results, message=message, query_scene=scene_labels), validated, user_id)
 
     @app.post("/api/search", response_model=SearchResponse)
@@ -673,6 +666,10 @@ def create_app(
     @app.get("/feedback", include_in_schema=False)
     def feedback_page() -> FileResponse:
         return FileResponse(application_frontend_root / "feedback.html", media_type="text/html")
+
+    @app.get("/admin/library", include_in_schema=False)
+    def library_review_page() -> FileResponse:
+        return FileResponse(application_frontend_root / "library-review.html", media_type="text/html")
 
     @app.get("/admin.js", include_in_schema=False)
     def admin_script() -> FileResponse:

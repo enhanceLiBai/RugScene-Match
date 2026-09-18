@@ -56,7 +56,7 @@ function historyCopyActions(item, image) {
     actions.append(button);
   }
   if (image) {
-    const button = feedbackNode('button', '复制图片', 'ghost');
+    const button = feedbackNode('button', '复制买家秀图片', 'ghost');
     button.type = 'button';
     button.onclick = async () => {
       if (button.disabled) return;
@@ -121,7 +121,8 @@ function renderFeedbackHistory(container, detail) {
     const card = feedbackNode('article', undefined, 'feedback-result');
     card.append(feedbackNode('h4', `Top ${item.rank} · 商品 ID：${item.product_id || '未填写'}`));
     if (item.style?.trim()) card.append(feedbackNode('p', `款式：${item.style.trim()}`, 'product-info'));
-    card.append(feedbackNode('p', `图片相似度分：${item.similarity}`));
+    card.append(feedbackNode('p', `原始相似度：${item.similarity} · 最终排序分：${item.ranking_score ?? item.similarity}`));
+    for (const reason of item.ranking_reasons || []) card.append(feedbackNode('p', reason));
     const buyerPhoto = feedbackPhoto(item.matched_buyer_image_url ? `${item.matched_buyer_image_url}?preview=1` : null, '相似买家秀');
     const comparison = feedbackNode('div', undefined, 'result-images');
     comparison.append(feedbackPhoto(detail.query_image_url, '客户照片'), buyerPhoto);

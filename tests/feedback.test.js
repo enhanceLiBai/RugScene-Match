@@ -44,7 +44,7 @@ test('历史详情复制对应商品 ID 和买家秀图片，无 ID 不显示按
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'feedback.js'), 'utf8'), context);
   const image = {decode: async () => {}, naturalWidth: 100, naturalHeight: 80};
   const actions = context.historyCopyActions({product_id: '12345'}, image);
-  assert.deepEqual(actions.children.map(x => x.textContent), ['复制商品 ID', '复制图片']);
+  assert.deepEqual(actions.children.map(x => x.textContent), ['复制商品 ID', '复制买家秀图片']);
   await actions.children[0].onclick();
   await actions.children[1].onclick();
   assert.deepEqual(copied, ['12345', image, png]);

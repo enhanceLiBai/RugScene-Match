@@ -113,6 +113,12 @@ def test_match_history_snapshot(client, monkeypatch, api_settings, api_session_f
 
 
 def test_single_import_labels_and_search_without_product(client, monkeypatch, api_session_factory):
+    from backend.scene import SceneClient
+    from backend.ranking import PROMPT
+    def ranking_request(self, prompt, images, **kwargs):
+        import json
+        return {'items': [dict(image_id=item['image_id'], view_distance='far', rug_area='small', query_tone='warm', candidate_tone='warm', query_evidence='暖光', candidate_evidence='暖光', tone_match='same', tone_reason='整体暖色一致') for item in json.loads(prompt[len(PROMPT):])]}
+    monkeypatch.setattr(SceneClient, '_request', ranking_request)
     from backend.scene import SceneClient, SceneError
     from backend.models import ProductImage
     from sqlalchemy import select
@@ -146,6 +152,8 @@ def test_single_import_labels_and_search_without_product(client, monkeypatch, ap
         assert row['product_image_url'] is None
         assert row['product_download_url'] is None
         assert row['scene_labels'] == tags
+        assert row['ranking_score'] <= row['similarity'] - 4
+        assert len(row['ranking_reasons']) == 3
 
     def unavailable(self, image):
         raise SceneError('test unavailable')
@@ -824,3 +832,55 @@ def test_history_time_filter(client, api_session_factory, monkeypatch):
     page = client.get('/api/history', params={'period': '7d', 'before': ids[2]}).json()
     assert {row['id'] for row in page['items']} == set(ids[:2])
     assert client.get('/api/history?period=invalid').status_code == 422
+
+
+def test_history_customer_filter(client, api_session_factory):
+    from backend.models import UserAccount, MatchHistory
+    from uuid import uuid4
+    from datetime import datetime, timezone
+    with api_session_factory() as session:
+        users = [UserAccount(username=uuid4().hex, display_name='筛选测试', password_hash='unused', role='customer_service') for _ in range(2)]
+        session.add_all(users)
+        session.flush()
+        records = [MatchHistory(user_id=user.id, payload_json='{"results":[]}', created_at=datetime.now(timezone.utc)) for user in (users[0], users[1], users[0])]
+        session.add_all(records)
+        session.flush()
+        customer_id = users[0].id
+        ids = [row.id for row in records]
+        session.commit()
+    params = {'customer_id': customer_id, 'period': 'today'}
+    response = client.get('/api/history', params=params)
+    assert response.status_code == 200
+    assert [row['id'] for row in response.json()['items']] == [ids[2], ids[0]]
+    params['before'] = ids[2]
+    assert [row['id'] for row in client.get('/api/history', params=params).json()['items']] == [ids[0]]
+    assert client.get('/api/history?customer_id=0').status_code == 422
+
+
+def test_search_never_reconsiders_scene_rejections(client, monkeypatch, api_session_factory):
+    from backend.scene import SceneClient
+    from backend.models import SceneLabel
+    from backend.repository import ImageRepository
+    import json
+    tags = dict(room='客厅', sofa_status='present', sofa_color='米色', floor_status='present', floor_color='浅灰色', floor_material='瓷砖/石材')
+    monkeypatch.setattr(SceneClient, 'identify', lambda *args: tags)
+    monkeypatch.setattr(SceneClient, '_request', lambda *a, **k: dict(view_distance='normal', rug_area='normal'))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('冲突复审不应再被调用')
+    monkeypatch.setattr(SceneClient, 'compare_scenes', forbidden)
+    original = ImageRepository.search_products
+    def filtered_only(self, *args, **kwargs):
+        assert kwargs.get('filter_scene', True) is True
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(ImageRepository, 'search_products', filtered_only)
+    upload = client.post('/api/library', files={'image': ('same.png', png_bytes('red'), 'image/png')})
+    assert upload.status_code == 200
+    image_id = upload.json()['image']['id']
+    with api_session_factory() as session:
+        label = session.get(SceneLabel, image_id)
+        label.labels_json = json.dumps({**tags, 'floor_material': '木纹'})
+        session.commit()
+    response = client.post('/api/search', files={'image': ('same.png', png_bytes('red'), 'image/png')})
+    assert response.status_code == 200
+    assert response.json()['results'] == []
+    assert '复核' not in response.json()['message']

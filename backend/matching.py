@@ -8,12 +8,12 @@ MIN_REVIEW_SIMILARITY = 80
 
 
 def review_conflicts(settings, repository, client, query_image, query_labels,
-                     accepted, visual_candidates, top_k):
+                     accepted, visual_candidates, top_k, *, retain_all=False):
     rows = list(accepted)
     notes = {}
     attempted = failures = 0
     checked = set()
-    cutoff = rows[-1].similarity_percent if len(rows) >= top_k else 0
+    cutoff = rows[top_k - 1].similarity_percent if len(rows) >= top_k else 0
     for candidate in visual_candidates:
         if candidate.similarity_percent < max(MIN_REVIEW_SIMILARITY, cutoff):
             continue
@@ -40,6 +40,8 @@ def review_conflicts(settings, repository, client, query_image, query_labels,
         except (SceneError, OSError, UnidentifiedImageError):
             failures += 1
     rows.sort(key=lambda row: (-row.similarity_percent, row.buyer_image_id, row.product_id or ''))
+    if retain_all:
+        return rows, notes, attempted, failures
     seen = set()
     results = []
     for row in rows:

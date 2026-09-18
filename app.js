@@ -133,8 +133,8 @@ function renderResults(payload, customerFile, savedCustomerUrl = null) {
         image.onerror = () => { image.hidden = true; image.parentElement.querySelector('figcaption').textContent = `${image.alt}暂不可用`; };
       });
     } else fragment.querySelector('img').src = item.matched_buyer_image_url;
-    fragment.querySelector('.score').textContent = `图片相似度分 ${item.similarity}`;
-    fragment.querySelector('.match-reason').textContent = item.match_explanation || view.sourceLabel;
+    fragment.querySelector('.score').textContent = `原始相似度 ${item.similarity} · 最终排序分 ${item.ranking_score ?? item.similarity}`;
+    fragment.querySelector('.match-reason').textContent = [item.match_explanation || view.sourceLabel, ...(item.ranking_reasons || [])].join('；');
     fragment.querySelector('h4').textContent = `商品 ID：${view.productId}`;
     if (item.style?.trim()) {
       const styleName = document.createElement('p');
@@ -152,7 +152,7 @@ function renderResults(payload, customerFile, savedCustomerUrl = null) {
     fragment.querySelector('.sku-line').replaceChildren(copyId);
     const copyImage = document.createElement('button');
     copyImage.type = 'button';
-    copyImage.textContent = '复制图片';
+    copyImage.textContent = '复制买家秀图片';
     copyImage.onclick = async () => {
       if (copyImage.disabled) return;
       if (!window.isSecureContext || !navigator.clipboard?.write || !window.ClipboardItem) {
@@ -313,7 +313,7 @@ function initializeMatchPage() {
     setBusy(button, true, '匹配中…');
     input.disabled = true;
     $('#results').hidden = true;
-    $('#matchHint').textContent = '正在识别场景并检索；高相似度但标签冲突的候选会进行双图复核，请稍候…';
+    $('#matchHint').textContent = '正在识别场景并筛选，随后计算构图与色调排序分，请稍候…';
     try {
       const payload = await api.searchSimilar(requestedFile, Number($('#topK').value), confirmed);
       renderResults(payload, requestedFile);

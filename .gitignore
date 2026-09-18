@@ -11,3 +11,15 @@ __pycache__/
 *.py[cod]
 .superpowers/
 .worktrees/
+
+data/ranking-labels/
+
+.publish-repo/
+
+runtime-logs/
+
+data/
+
+*.xlsx
+
+pytest-cache-files-*/

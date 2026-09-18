@@ -99,7 +99,7 @@ def install_auth(app, factory, frontend_root):
             except SQLAlchemyError:
                 return JSONResponse({'detail': '登录状态暂不可用，请稍后重试。'}, status_code=503)
             if not user:
-                if path in ('/', '/admin', '/feedback'):
+                if path in ('/', '/admin', '/feedback', '/admin/library'):
                     return RedirectResponse('/login' if path == '/' else '/admin/login', status_code=303)
                 return JSONResponse({'detail': '登录已过期，请重新登录。'}, status_code=401)
             request.state.user = user

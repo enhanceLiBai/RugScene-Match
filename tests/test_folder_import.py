@@ -1,19 +1,22 @@
 import pytest
 from types import SimpleNamespace
 from PIL import Image
-from backend.folder_import import parse_folder, validate_audit, main
+from backend.folder_import import parse_folder, validate_labels, main
 from backend.folder_screen import rejected_destination, validate_decision
 
 def test_folder_identity():
     assert parse_folder('123_款式_暖色') == ('123', '款式_暖色')
     assert parse_folder('未知商品ID_米白') == (None, '米白')
 
-def test_audit_requires_valid_labels_and_boolean():
-    assert validate_audit(dict(approved=False,rejection_reasons=['有人'],labels=None))['approved'] is False
+def test_label_normalizes_non_present_attributes():
+    labels = dict(room='客厅',sofa_status='not_present',sofa_color='黑色',sofa_material='皮质',floor_status='unknown',floor_color='棕色',floor_material='木纹',image_tone='中性')
+    assert validate_labels(labels)['sofa_color'] == '无法判断'
+    assert labels['floor_material'] == '无法判断'
+
+
+def test_label_requires_complete_valid_shape():
     with pytest.raises(ValueError):
-        validate_audit(dict(approved='true',rejection_reasons=[],labels={}))
-    with pytest.raises(ValueError):
-        validate_audit(dict(approved=True,rejection_reasons=[],labels={}))
+        validate_labels(dict(room='客厅'))
 
 def test_scan_does_not_call_model_or_write_report(tmp_path):
     folder=tmp_path/'123_款式'; folder.mkdir(); (folder/'a.jpg').write_bytes(b'not-read-in-scan')

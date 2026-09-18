@@ -4,7 +4,9 @@ import base64
 import json
 import os
 import re
+from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 import httpx
 from dotenv import dotenv_values
 from PIL import Image
@@ -53,11 +55,31 @@ class SceneClient:
 
     @timed("scene_identify")
     def identify(self, image):
-        prompt = '识别空间类型、沙发和地板。沙发颜色以主体面料为准，排除抱枕、毯子。地板颜色和材质只依据裸露的实际地面，必须排除地毯；地毯完全遮挡地面时不得猜测。考虑暖光和阴影，尽量识别物体本色。沙发/地板先填状态：present=画面确认存在，not_present=确认没有，unknown=可能存在但看不清；present时填写颜色/材质，否则颜色材质填无法判断。不确定时填无法判断。只返回JSON，键及允许值：' + json.dumps(OPTIONS, ensure_ascii=False)
+        prompt = '识别空间类型、沙发和地板。沙发颜色以主体面料为准，排除抱枕、毯子。地板颜色和材质只依据裸露的实际地面，必须排除地毯；地毯完全遮挡地面时不得猜测。考虑暖光和阴影，尽量识别物体本色。沙发/地板先填状态：present=画面确认存在，not_present=确认没有，unknown=可能存在但看不清；present时填写颜色/材质，否则颜色材质填无法判断。不确定时填无法判断。沙发颜色不在允许枚举内时，sofa_color填其他，并在sofa_color_detail中记录可见的具体颜色描述；无法判断时填无法判断。只返回JSON，键及允许值：' + json.dumps(OPTIONS, ensure_ascii=False) + '；sofa_color_detail为可选中文描述。'
         try:
-            return validate_labels(self._request(prompt, [image]))
+            raw = self._request(prompt, [image])
+            self._record_color_observation(raw)
+            return validate_labels(raw)
         except ValueError:
             raise SceneError('场景标签格式无效') from None
+
+    def _record_color_observation(self, raw):
+        """记录模型对非标准沙发颜色的描述，不参与当前标签输出。"""
+        if not isinstance(raw, dict):
+            return
+        detail = raw.get('sofa_color_detail')
+        color = raw.get('sofa_color')
+        if not isinstance(detail, str) or not detail.strip() or color not in ('其他', '无法判断'):
+            return
+        path = Path(__file__).resolve().parents[1] / 'data' / 'sofa-color-observations.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {'recorded_at': datetime.now(timezone.utc).isoformat(), 'sofa_color': color,
+                 'sofa_color_detail': detail.strip()[:120]}
+        try:
+            with path.open('a', encoding='utf-8') as output:
+                output.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        except OSError:
+            pass
 
     @timed("scene_compare")
     def compare_scenes(self, query_image, candidate_image):
