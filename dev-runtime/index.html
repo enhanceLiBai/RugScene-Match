@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>地毯买家秀智能匹配 · MVP</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CARPET MATCHER / MVP</p>
+        <h1>买家秀智能匹配助手</h1>
+      </div>
+      <div><span id="accountStatus">正在读取账号…</span> <button id="logoutButton" type="button">退出登录</button></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="kicker">给客服更快、更有依据的推荐</p>
+          <h2>上传客户家的照片，找到最接近的真实场景。</h2>
+          <p>系统使用 OpenCLIP 图片向量查找相似实拍；商品信息可在后续逐步补充。</p>
+        </div>
+      </section>
+
+      <details id="myHistory" class="panel" style="margin-bottom:24px">
+        <summary>我的查询记录 · 补登记下单</summary>
+        <button id="myHistoryRefresh" type="button" class="ghost">刷新记录</button>
+        <p id="myHistoryStatus" aria-live="polite"></p>
+        <div id="myHistoryList"></div>
+        <button id="myHistoryMore" type="button" class="ghost" hidden>加载更多</button>
+      </details>
+      <p id="viewingMyHistory" hidden></p>
+      <section id="match" class="view active">
+        <div class="panel upload-panel">
+          <div class="panel-heading">
+            <div><p class="section-label">01 / 客户家居图</p><h3>发来照片后，在这里开始匹配</h3></div>
+            <span class="badge">内部客服使用</span>
+          </div>
+          <label class="dropzone" id="queryDropzone" for="queryImage">
+            <input id="queryImage" type="file" accept="image/*" />
+            <img id="queryPreview" alt="客户家居图预览" hidden />
+            <div class="dropzone-copy"><span class="plus">＋</span><strong>选择或拖入客户家的照片</strong><small>支持 JPG、PNG、WEBP</small></div>
+          </label>
+          <div class="filters">
+            <label>结果数量<select id="topK"><option value="3" selected>Top 3</option><option value="5">Top 5</option><option value="10">Top 10</option></select></label>
+            <button id="matchButton" class="primary">开始匹配</button>
+          </div>
+          <p class="hint" id="matchHint" aria-live="polite">先上传客户图；图库为空时请联系管理员录入买家秀。</p>
+          <p id="queryScene" aria-live="polite"></p>
+          <details id="sceneConfirmation">
+            <summary>核对或手动确认客户场景</summary>
+            <p class="hint">请仅确认照片中可见的属性，地板不包含地毯。勾选后按确认值检索，不再调用自动识别。</p>
+            <div class="form-grid" id="sceneFields"></div>
+            <label><input type="checkbox" id="useConfirmedScene">使用我确认的标签</label>
+          </details>
+        </div>
+        <section id="results" class="results" hidden>
+          <div class="result-title"><div><p class="section-label">02 / 推荐结果</p><h3>最接近的真实买家秀</h3></div><span id="resultCount"></span></div>
+          <div id="resultGrid" class="result-grid"></div>
+          <form id="conversionForm" class="panel match-feedback">
+            <fieldset id="conversionFields">
+              <legend>下单成功登记</legend>
+              <p class="hint">客户已下单时再登记，未下单无需操作。也可以从“我的查询记录”回来补填。</p>
+              <label for="conversionRank">下单对应本次 Top 排名</label>
+              <select id="conversionRank" required><option value="">请选择</option></select>
+              <label for="conversionProduct">商品 ID（由匹配结果自动带出，不可修改）</label>
+              <input id="conversionProduct" readonly>
+              <button id="conversionSubmit" class="primary" type="submit">登记下单成功</button>
+            </fieldset>
+            <p id="conversionStatus" class="status-message" aria-live="polite" hidden></p>
+          </form>
+        </section>
+      </section>
+
+    </main>
+
+    <template id="resultTemplate"><article class="result-card"><div class="result-images"><figure><img class="customer-image" alt="客户照片" /><figcaption>客户照片 <a class="download-link customer-download" download>下载</a></figcaption></figure><figure><img class="buyer-image" alt="相似买家秀" /><figcaption>相似买家秀 <a class="download-link buyer-download" download>下载</a></figcaption></figure></div><div class="result-body"><div class="score-row"><span class="score"></span><span class="match-reason"></span></div><h4></h4><p class="sku-line"></p><div class="chips"></div><div class="product-info"></div><div class="script"><p>建议话术</p><blockquote></blockquote><button class="copy-button">复制话术</button></div></div></article></template>
+    <script src="matcher-core.js"></script>
+    <script src="api-client.js"></script>
+    <script src="/orders.js"></script>
+    <script src="app.js"></script>
+    <script src="/auth-client.js"></script>
+  </body>
+</html>

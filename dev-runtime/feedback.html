@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理后台 · 买家秀匹配</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/feedback.css">
+</head>
+<body>
+  <header class="topbar"><div><p class="eyebrow">CARPET MATCHER / FEEDBACK</p><h1>买家秀管理后台</h1></div><div><span id="accountStatus">正在读取账号…</span> <button id="logoutButton" type="button">退出登录</button> <a href="/">返回客服页面</a></div></header>
+  <main>
+    <nav class="tabs" aria-label="管理导航">
+      <button class="tab active" data-view="feedback">下单成功</button>
+      <button class="tab" data-view="library">买家秀图库</button>
+      <button class="tab" data-view="history">历史匹配记录</button>
+      <button class="tab" data-view="accounts">客服账号</button>
+      <button class="tab" data-view="monitor">查询监控</button>
+    </nav>
+    <section id="feedback" class="view active">
+    <section class="panel">
+      <div class="feedback-toolbar">
+        <button id="refreshFeedback" class="ghost" type="button">刷新下单记录</button>
+      </div>
+      <p id="conversionSummary" class="hint"></p>
+      <p class="hint">按已关联客服的查询记录统计，含无结果查询；每条查询最多计一次转化，非订单总数。</p>
+      <p id="adminFeedbackStatus" class="status-message" aria-live="polite"></p>
+      <div id="feedbackList"></div>
+      <button id="moreFeedback" class="ghost" type="button" hidden>加载更多</button>
+    </section>
+    </section>
+    <section id="monitor" class="view">
+      <section class="panel">
+        <h3>客服查询监控</h3>
+        <div class="feedback-toolbar"><label for="monitorCustomer">客服</label><select id="monitorCustomer"><option value="">全部客服</option></select><label for="monitorPeriod">时间</label><select id="monitorPeriod"><option value="7d">近七天</option><option value="all">全部</option></select><button id="refreshMonitor" class="ghost" type="button">刷新</button></div>
+        <p id="monitorSummary" class="hint"></p><p id="monitorStatus" class="status-message" aria-live="polite"></p><div id="monitorList"></div>
+      </section>
+    </section>
+    <section id="library" class="view">
+        <form id="excelForm" class="panel">
+          <h3>用 Excel 更新买家秀库</h3>
+          <button id="labelExisting" type="button">补充已有买家秀场景标签</button>
+          <p id="labelStatus" aria-live="polite"></p>
+          <p>上传“产品参数&amp;价格.xlsx”，自动绑定同一行的商品 ID、商品主图和买家秀。重复导入会复用已有图片。</p>
+          <input id="excelFile" type="file" accept=".xlsx" required />
+          <button id="excelButton" class="primary" type="submit">导入 Excel</button>
+          <button id="excelResume" type="button" hidden>继续查询进度</button>
+          <progress id="excelProgress" max="100" value="0" hidden></progress>
+          <p id="excelStatus" aria-live="polite"></p>
+          <div id="excelSummary"></div>
+        </form>
+        <div class="two-col">
+          <form id="entryForm" class="panel entry-form">
+            <p class="section-label">新增买家秀</p><h3>单张图片导入</h3>
+            <p class="hint">自动生成图片向量并识别场景标签。无需商品主图或商品 ID 即可参与检索；下方资料均为选填。</p>
+            <label class="mini-dropzone" for="entryImage"><input id="entryImage" type="file" accept="image/*" required /><span id="entryImageText">＋ 选择买家秀图片</span><img id="entryPreview" alt="买家秀预览" hidden /></label>
+            <div class="form-grid">
+              <label>地毯 SKU（选填）<input id="sku" placeholder="例如 CT-208-CRM" /></label>
+              <label>商品名称（选填）<input id="productName" placeholder="例如 云朵奶油风地毯" /></label>
+              <label>主推规格（选填）<input id="size" placeholder="例如 160×230cm" /></label>
+              <label>参考价（元，选填）<input id="price" type="number" min="0" step="0.01" placeholder="例如 899" /></label>
+              <label>空间（选填）<select id="room"><option value="">未填写</option><option>客厅</option><option>卧室</option><option>玄关</option><option>餐厅</option></select></label>
+              <label>风格（选填）<select id="style"><option value="">未填写</option><option>奶油风</option><option>原木风</option><option>现代简约</option><option>中古风</option><option>轻奢风</option></select></label>
+              <label>主色（选填）<input id="color" placeholder="例如 米白、浅咖" /></label>
+              <label>库存（选填）<select id="stock"><option value="">未填写</option><option value="现货">现货</option><option value="预售">预售</option><option value="缺货">缺货</option></select></label>
+            </div>
+            <label>成交亮点 / 话术依据（选填）<textarea id="sellingPoint" placeholder="例如：短绒易打理，米白色能提亮小户型客厅。"></textarea></label>
+            <button class="primary" id="entrySubmitButton" type="submit">保存并加入图库</button>
+            <p class="status-message" id="entryStatus" aria-live="polite" hidden></p>
+          </form>
+          <aside class="panel library-list">
+            <div class="panel-heading">
+              <div><p class="section-label">图库列表</p><h3>已入库买家秀（<span id="libraryCount">0</span>）</h3></div>
+                <a href="/admin/library" target="_blank" rel="noopener">大图清洗页面 ↗</a>
+                <button id="reloadLibraryButton" class="retry-button" type="button">刷新图库</button>
+            </div>
+            <p class="status-message" id="libraryStatus" aria-live="polite" hidden></p>
+            <div id="libraryGrid" class="library-grid"></div>
+          </aside>
+        </div>
+      </section>
+      <section id="history" class="view">
+        <div class="panel">
+          <h3>历史匹配记录</h3>
+          <p>当前为团队共享记录。保存客户照片、当次场景标签与推荐结果，可打开记录进行对照。旧记录若未保存客户照片，将无法补回。</p>
+          <div class="feedback-toolbar">
+            <label for="historyCustomer">客服</label>
+            <select id="historyCustomer"><option value="">全部</option></select>
+            <label for="historyPeriod">时间范围</label>
+            <select id="historyPeriod"><option value="all">全部</option><option value="today">今天</option><option value="3d">近三天</option><option value="7d">近七天</option><option value="30d">1个月内</option></select>
+            <button id="historyRefresh" class="ghost" type="button">刷新记录</button>
+          </div>
+          <p class="hint">按北京时间计算，包含今天；1个月内按近30天计算。</p>
+          <p id="historyStatus" aria-live="polite"></p>
+          <div id="historyList"></div><section id="historyDetail" class="panel" aria-live="polite" hidden></section>
+          <button id="historyMore" type="button" hidden>加载更多</button>
+        </div>
+      </section>
+    <section id="accounts" class="view">
+      <form id="accountForm" class="panel entry-form">
+        <h3>开通客服账号</h3>
+        <label>登录账号<input id="newUsername" autocomplete="off" minlength="2" maxlength="40" required placeholder="例如 小王、客服小李、kefu01"></label>
+        <p class="hint">支持2–40个中文、英文字母、数字、点、横线或下划线，不含空格。</p>
+        <label>客服姓名<input id="newDisplayName" maxlength="60" required></label>
+        <label>初始密码<input id="newPassword" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+        <label>确认密码<input id="confirmPassword" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+        <button id="createAccount" class="primary" type="submit">开通账号</button>
+        <p id="accountCreateStatus" aria-live="polite"></p>
+      </form>
+      <section class="panel"><h3>已开通账号</h3><button id="refreshAccounts" type="button">刷新账号</button><p id="accountsStatus" aria-live="polite"></p><div id="accountsList"></div></section>
+    </section>
+  </main>
+  <script src="/matcher-core.js"></script>
+  <script src="/api-client.js"></script>
+  <script src="/app.js"></script>
+  <script src="/feedback.js"></script>
+  <script src="/admin.js"></script>
+  <script src="/auth-client.js"></script>
+</body>
+</html>

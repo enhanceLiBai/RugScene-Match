@@ -1,0 +1,31 @@
+name: rugscene
+services:
+  app:
+    build: .
+    image: rugscene-app:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: pgvector
+      POSTGRES_PORT: "5432"
+      MODEL_DEVICE: cuda
+      CLIP_CACHE_DIR: /app/.cache/open_clip
+    ports:
+      - "${APP_PORT:-8001}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./.cache/open_clip:/app/.cache/open_clip
+    gpus: all
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+networks:
+  database:
+    external: true
+    name: rugscene-network

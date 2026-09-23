@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!requirements.in
+!backend/
+!backend/**
+!index.html
+!app.js
+!api-client.js
+!matcher-core.js
+!styles.css
+**/__pycache__/
+**/*.pyc

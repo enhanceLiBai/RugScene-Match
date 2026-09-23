@@ -104,6 +104,14 @@ class SceneLabel(Base):
     model: Mapped[str] = mapped_column(Text)
     version: Mapped[str] = mapped_column(Text)
     labels_json: Mapped[str] = mapped_column(Text)
+    sofa_color: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sofa_color_group: Mapped[str | None] = mapped_column(Text, nullable=True)
+    floor_color: Mapped[str | None] = mapped_column(Text, nullable=True)
+    floor_color_group: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wall_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wall_color: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wall_color_group: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wall_material: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -160,6 +168,17 @@ class MatchConversion(Base):
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     product_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_by: Mapped[int] = mapped_column(BigInteger, ForeignKey('user_accounts.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MatchException(Base):
+    """管理员待处理的无结果检索记录。"""
+    __tablename__ = 'match_exceptions'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    history_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('match_history.id', ondelete='CASCADE'), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default='open')
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('user_accounts.id'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

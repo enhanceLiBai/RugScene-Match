@@ -11,6 +11,14 @@ def test_scene_matching_and_unknown():
 def test_invalid_labels_rejected():
     with pytest.raises(ValueError): validate_labels({'sofa_color':'imaginary'})
 
+def test_other_color_uses_model_detail_when_available():
+    labels = validate_labels({'room':'客厅', 'sofa_status':'present',
+                              'sofa_color':'其他', 'sofa_color_detail':'卡其色/浅棕色',
+                              'floor_status':'present', 'floor_color':'浅灰色',
+                              'floor_material':'瓷砖/石材'})
+    assert labels['sofa_color'] == '卡其色'
+    assert labels['sofa_color_group'] == '棕色系'
+
 
 def test_strict_filters_and_visual_order():
     query = dict(room='客厅', sofa_status='present', sofa_color='米色',

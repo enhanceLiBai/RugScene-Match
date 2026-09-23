@@ -24,6 +24,9 @@ def conversion_data(row):
 
 
 def install_conversions(app, factory):
+    def require_admin(request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '仅管理员可查看统计数据。')
     def owned_history(session, history_id, user_id):
         row = session.get(MatchHistory, history_id)
         if row is None or row.user_id != user_id:
@@ -147,3 +150,50 @@ def install_conversions(app, factory):
                         'truncated': len(histories) > 500}
         except SQLAlchemyError:
             raise HTTPException(503, '查询监控暂不可用，请重试。') from None
+
+    @app.get('/api/admin/statistics')
+    def admin_statistics(request: Request, period: str = '7d', customer_id: int | None = Query(None, ge=1), start_date: str | None = None, end_date: str | None = None):
+        require_admin(request)
+        periods = {'today': 1, '7d': 7, '30d': 30, 'all': None}
+        if period not in periods:
+            raise HTTPException(422, '统计范围只支持今日、近七天、近三十天或全部。')
+        try:
+            with factory() as session:
+                start = None
+                end = None
+                if period == 'custom':
+                    try:
+                        start = datetime.fromisoformat((start_date or '') + 'T00:00:00+08:00')
+                        end = datetime.fromisoformat((end_date or '') + 'T23:59:59.999999+08:00')
+                    except ValueError:
+                        raise HTTPException(422, '自定义日期必须为 YYYY-MM-DD 格式。') from None
+                    if start > end:
+                        raise HTTPException(422, '开始日期不能晚于结束日期。')
+                if periods[period] is not None:
+                    today = datetime.now(timezone(timedelta(hours=8))).replace(hour=0, minute=0, second=0, microsecond=0)
+                    start = today - timedelta(days=periods[period] - 1)
+                conditions = [MatchHistory.user_id.is_not(None)]
+                if customer_id is not None:
+                    conditions.append(MatchHistory.user_id == customer_id)
+                if start is not None:
+                    conditions.append(MatchHistory.created_at >= start)
+                if end is not None:
+                    conditions.append(MatchHistory.created_at <= end)
+                histories = list(session.scalars(select(MatchHistory).where(and_(*conditions)).order_by(MatchHistory.created_at)))
+                ids = [row.id for row in histories]
+                conversions = list(session.scalars(select(MatchConversion).where(MatchConversion.history_id.in_(ids)))) if ids else []
+                converted_ids = {row.history_id for row in conversions}
+                trend = {}
+                for row in histories:
+                    key = row.created_at.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+                    bucket = trend.setdefault(key, {'date': key, 'matches': 0, 'conversions': 0})
+                    bucket['matches'] += 1
+                    if row.id in converted_ids:
+                        bucket['conversions'] += 1
+                total = len(histories)
+                converted = len(converted_ids)
+                return {'period': period, 'customer_id': customer_id, 'total_matches': total,
+                        'converted_matches': converted, 'conversion_rate': round(converted / total * 100, 2) if total else 0,
+                        'trend': list(trend.values())}
+        except SQLAlchemyError:
+            raise HTTPException(503, '统计数据暂不可用，请重试。') from None

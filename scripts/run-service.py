@@ -17,7 +17,7 @@ log.addHandler(handler)
 
 while True:
     log.info("Starting FastAPI")
-    child = subprocess.Popen([sys.executable, "-u", "-c", "import logging; logging.basicConfig(level=logging.INFO); from backend.cli import main; raise SystemExit(main(['serve']))"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+    child = subprocess.Popen([sys.executable, "-u", "-c", "import logging; logging.basicConfig(level=logging.INFO); from backend.cli import main; raise SystemExit(main(['serve', '--host', '0.0.0.0', '--port', '8000']))"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
     try:
         for line in child.stdout:
             log.info(line.rstrip())

@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from backend.config import Settings
-from backend.folder_import import parse_folder
+from backend.folder_common import parse_folder
 from backend.image_assets import validate_image_bytes
 from backend.scene import SceneClient, SceneError, SceneQuotaError
 

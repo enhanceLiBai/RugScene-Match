@@ -19,9 +19,10 @@ from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import text, select
-from backend.models import MatchHistory, MatchHistoryImage, MatchFeedback, SceneLabel, UserAccount
+from backend.models import MatchHistory, MatchHistoryImage, MatchFeedback, MatchException, SceneLabel, UserAccount
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -263,6 +264,9 @@ def create_app(
                 dispose_session_factory(application_session_factory)
 
     app = FastAPI(title="地毯图片相似检索 API", lifespan=lifespan)
+    admin_dist = application_frontend_root / "admin-ui-dist"
+    if admin_dist.exists():
+        app.mount("/admin/v2/assets", StaticFiles(directory=admin_dist / "assets"), name="admin-v2-assets")
     install_auth(app, application_session_factory, application_frontend_root)
     install_conversions(app, application_session_factory)
     app.middleware('http')(restrict_management_access)
@@ -279,6 +283,8 @@ def create_app(
                 record.payload_json = payload.model_dump_json()
                 session.add(MatchHistoryImage(history_id=record.id,
                     content=customer_image.raw_bytes, mime_type=customer_image.mime_type))
+                if not payload.results:
+                    session.add(MatchException(history_id=record.id))
                 session.commit()
         except SQLAlchemyError:
             payload.history_id = None
@@ -384,6 +390,63 @@ def create_app(
                                 headers={'Cache-Control': 'private, no-store'})
         except SQLAlchemyError:
             raise HTTPException(status_code=503, detail='历史照片暂不可用。') from None
+
+    @app.get('/api/admin/exceptions')
+    def list_match_exceptions(request: Request, status: Literal['open', 'resolved', 'all'] = 'open',
+                              customer_id: int | None = Query(None, ge=1)):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(status_code=403, detail='仅管理员可查看异常记录。')
+        try:
+            with application_session_factory() as session:
+                stmt = select(MatchException).order_by(MatchException.id.desc()).limit(200)
+                if status != 'all':
+                    stmt = stmt.where(MatchException.status == status)
+                rows = list(session.scalars(stmt))
+                histories = {row.id: session.get(MatchHistory, row.history_id) for row in rows}
+                users = {u.id: public_user(u) for u in session.scalars(select(UserAccount).where(
+                    UserAccount.id.in_([h.user_id for h in histories.values() if h and h.user_id])))}
+                items = []
+                for row in rows:
+                    history = histories[row.id]
+                    if history is None or (customer_id is not None and history.user_id != customer_id):
+                        continue
+                    payload = json.loads(history.payload_json)
+                    items.append({'id': row.id, 'history_id': row.history_id, 'status': row.status,
+                                  'created_at': row.created_at.isoformat(), 'resolved_at': row.resolved_at.isoformat() if row.resolved_at else None,
+                                  'user': users.get(history.user_id), 'query_image_url': f'/api/history/{history.id}/image',
+                                  'query_scene': payload.get('query_scene'), 'message': payload.get('message')})
+                return {'items': items}
+        except SQLAlchemyError:
+            raise HTTPException(status_code=503, detail='异常记录暂不可用。') from None
+
+    @app.get('/api/admin/exceptions/{exception_id}')
+    def match_exception_detail(exception_id: int, request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(status_code=403, detail='仅管理员可查看异常记录。')
+        with application_session_factory() as session:
+            row = session.get(MatchException, exception_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail='异常记录不存在。')
+            history = session.get(MatchHistory, row.history_id)
+            if history is None:
+                raise HTTPException(status_code=404, detail='关联匹配记录不存在。')
+            return {'id': row.id, 'history_id': row.history_id, 'status': row.status,
+                    'created_at': row.created_at.isoformat(), 'payload': json.loads(history.payload_json),
+                    'query_image_url': f'/api/history/{history.id}/image'}
+
+    @app.post('/api/admin/exceptions/{exception_id}/resolve')
+    def resolve_match_exception(exception_id: int, request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(status_code=403, detail='仅管理员可处理异常记录。')
+        with application_session_factory() as session:
+            row = session.get(MatchException, exception_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail='异常记录不存在。')
+            row.status = 'resolved'
+            row.resolved_at = datetime.now(timezone.utc)
+            row.resolved_by = request.state.user['id']
+            session.commit()
+            return {'id': row.id, 'status': row.status}
 
     @app.post('/api/scene-labels/backfill')
     def label_existing(background_tasks: BackgroundTasks):
@@ -666,6 +729,13 @@ def create_app(
     @app.get("/feedback", include_in_schema=False)
     def feedback_page() -> FileResponse:
         return FileResponse(application_frontend_root / "feedback.html", media_type="text/html")
+
+    @app.get("/admin/v2", include_in_schema=False)
+    def react_admin_page() -> FileResponse:
+        built_index = application_frontend_root / "admin-ui-dist" / "index.html"
+        if built_index.exists():
+            return FileResponse(built_index, media_type="text/html")
+        return FileResponse(application_frontend_root / "admin-react.html", media_type="text/html")
 
     @app.get("/admin/library", include_in_schema=False)
     def library_review_page() -> FileResponse:

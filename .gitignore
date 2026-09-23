@@ -11,15 +11,11 @@ __pycache__/
 *.py[cod]
 .superpowers/
 .worktrees/
-
-data/ranking-labels/
-
 .publish-repo/
 
-runtime-logs/
-
+data/ranking-labels/
 data/
-
 *.xlsx
-
 pytest-cache-files-*/
+客服账号/
+dev-runtime/客服账号/

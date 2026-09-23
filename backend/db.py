@@ -36,6 +36,7 @@ def create_database_and_schema(settings: Settings) -> None:
             _upgrade_sha256_column(connection)
             _ensure_sha256_check_constraint(connection)
             _upgrade_image_metadata_columns(connection)
+            _upgrade_scene_label_columns(connection)
             connection.execute(text('ALTER TABLE match_history ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES user_accounts(id)'))
             connection.execute(text('ALTER TABLE match_feedback ADD COLUMN IF NOT EXISTS submitted_by BIGINT REFERENCES user_accounts(id)'))
     finally:
@@ -132,3 +133,18 @@ def _upgrade_image_metadata_columns(connection: Connection) -> None:
             "CHECK (price IS NULL OR price >= 0)"
         )
     )
+
+
+def _upgrade_scene_label_columns(connection: Connection) -> None:
+    """为场景标签补齐可查询的颜色、色组和墙面字段。"""
+    for statement in (
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS sofa_color TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS sofa_color_group TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS floor_color TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS floor_color_group TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS wall_status TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS wall_color TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS wall_color_group TEXT",
+        "ALTER TABLE scene_labels ADD COLUMN IF NOT EXISTS wall_material TEXT",
+    ):
+        connection.execute(text(statement))

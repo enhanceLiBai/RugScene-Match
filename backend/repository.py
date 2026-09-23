@@ -409,16 +409,28 @@ class ImageRepository:
         )
         import json
         from backend.models import SceneLabel
-        from backend.scene import VERSION, score_scene
+        from backend.scene import VERSION, score_scene_with_mode
         labels = {x.image_id: json.loads(x.labels_json) for x in self._session.scalars(select(SceneLabel).where(SceneLabel.model == scene_model, SceneLabel.version == VERSION))}
-        candidates = []
+        raw_candidates = []
         for product_id, buyer_id, main_id, column, distance_value, style in self._session.execute(statement):
             visual = cosine_distance_to_percent(float(distance_value))
             tags = labels.get(buyer_id)
-            score = score_scene(scene_labels, tags, visual)[0] if filter_scene else visual
-            if score < 0:
-                continue
-            candidates.append(ProductSearchRow(product_id,buyer_id,main_id,column,score,tags,style))
+            raw_candidates.append((product_id, buyer_id, main_id, column, visual, tags, style))
+        candidates = []
+        if filter_scene:
+            exact = []
+            grouped = []
+            for product_id, buyer_id, main_id, column, visual, tags, style in raw_candidates:
+                group_score = score_scene_with_mode(scene_labels, tags, visual, exact_color=False)
+                if group_score[0] >= 0:
+                    grouped.append(ProductSearchRow(product_id,buyer_id,main_id,column,visual,tags,style))
+                    exact_score = score_scene_with_mode(scene_labels, tags, visual, exact_color=True)
+                    if exact_score[0] >= 0:
+                        exact.append(ProductSearchRow(product_id,buyer_id,main_id,column,visual,tags,style))
+            candidates = exact if exact else grouped
+        else:
+            candidates = [ProductSearchRow(product_id,buyer_id,main_id,column,visual,tags,style)
+                          for product_id, buyer_id, main_id, column, visual, tags, style in raw_candidates]
         candidates.sort(key=lambda row: (-row.similarity_percent,row.buyer_image_id,row.product_id or ''))
         seen: set[tuple[str, str | int]] = set()
         results = []

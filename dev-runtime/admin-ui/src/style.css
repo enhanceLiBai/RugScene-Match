@@ -1,0 +1,4 @@
+body{margin:0;background:#f5f7fa}.brand{font-size:18px;font-weight:600;color:#fff;padding:0 20px;line-height:64px}.header{background:#fff;padding:0 24px}.content{padding:24px}.trend{margin-top:16px}.exception-img{width:48px;height:48px;object-fit:cover;border-radius:6px}
+
+.filter-card{margin-bottom:16px}.overview-card .ant-statistic{margin-bottom:10px}.overview-card .ant-statistic-content{font-size:32px}.chart-legend{display:flex;gap:24px;justify-content:center;margin-bottom:8px}.chart-legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}.trend-chart{display:block;width:100%;min-height:200px;max-height:360px}.trend-chart text{fill:#667085;font-size:12px}.ant-layout{min-height:100vh}
+.exception-filters{margin-bottom:16px}
