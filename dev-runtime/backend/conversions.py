@@ -311,10 +311,10 @@ def install_conversions(app, factory):
             raise HTTPException(503, '商品统计暂不可用，请重试。') from None
 
     @app.get('/api/admin/product-category-statistics')
-    def product_category_statistics(request: Request, category: str = 'sofa_color', value: str = '', period: str = '7d',
+    def product_category_statistics(request: Request, category: str = 'sofa_color', value: str = '', product_id: str = '', product_query: str = '', period: str = '7d',
                                     start_date: date | None = None, end_date: date | None = None):
         require_admin(request)
-        if category not in {'sofa_color', 'floor_color'}:
+        if category not in {'sofa_color', 'floor_color', 'floor_type'}:
             raise HTTPException(422, '请选择有效的分类。')
         if period not in {'today', 'week', 'month', '7d', '30d', 'all', 'custom'}:
             raise HTTPException(422, '请选择有效的统计范围。')
@@ -335,23 +335,36 @@ def install_conversions(app, factory):
                 for link, image, label in images:
                     tags = json.loads(label.labels_json) if label and label.labels_json else {}
                     label_value = tags.get(category)
+                    if product_id and str(link.product_id) != product_id: continue
+                    if product_query and product_query.casefold() not in str(link.product_id).casefold() and product_query.casefold() not in (image.product_name or image.style or '').casefold(): continue
                     if value and label_value != value: continue
                     selected.append((link.product_id, image, label_value or '未识别'))
                 histories = list(session.scalars(select(MatchHistory).where(and_(MatchHistory.created_at < end, *( [MatchHistory.created_at >= start] if start else [])))))
                 counts = {}; converted = {}
                 for history in histories:
-                    seen = set()
                     for result in json.loads(history.payload_json).get('results', []):
-                        pid = str(result.get('product_id') or '')
-                        if pid and pid not in seen: counts[pid] = counts.get(pid, 0) + 1; seen.add(pid)
+                        image_id = result.get('buyer_image_id')
+                        if image_id is not None: counts[int(image_id)] = counts.get(int(image_id), 0) + 1
                 for row in session.scalars(select(MatchConversion).where(MatchConversion.history_id.in_([h.id for h in histories])) if histories else select(MatchConversion).where(False)):
-                    if row.product_id: converted[row.product_id] = converted.get(row.product_id, 0) + 1
+                    history = next((h for h in histories if h.id == row.history_id), None)
+                    result = next((r for r in json.loads(history.payload_json).get('results', []) if isinstance(r, dict) and r.get('rank') == row.rank), None) if history else None
+                    image_id = result.get('buyer_image_id') if result else None
+                    if image_id is not None: converted[int(image_id)] = converted.get(int(image_id), 0) + 1
                 items = [{'product_id': pid, 'image_id': image.id, 'image_url': f'/api/images/{image.id}', 'category_value': val,
-                          'product_name': image.product_name or image.style, 'total_matches': counts.get(pid, 0),
-                          'converted_matches': converted.get(pid, 0), 'conversion_rate': round(converted.get(pid, 0) / counts.get(pid, 1) * 100, 2) if counts.get(pid) else 0}
+                          'product_name': image.product_name or image.style, 'total_matches': counts.get(image.id, 0),
+                          'converted_matches': converted.get(image.id, 0), 'conversion_rate': round(converted.get(image.id, 0) / counts.get(image.id, 1) * 100, 2) if counts.get(image.id) else 0}
                          for pid, image, val in selected]
                 items.sort(key=lambda x: (-x['total_matches'], x['product_id'], x['image_id']))
-                return {'category': category, 'value': value, 'period': period, 'values': sorted({x['category_value'] for x in items}), 'items': items,
+                groups = {}
+                for item in items:
+                    group = groups.setdefault(item['category_value'], {'category_value': item['category_value'], 'buyer_images': 0, 'total_matches': 0, 'converted_matches': 0})
+                    group['buyer_images'] += 1
+                    group['total_matches'] += item['total_matches']
+                    group['converted_matches'] += item['converted_matches']
+                for group in groups.values():
+                    group['conversion_rate'] = round(group['converted_matches'] / group['total_matches'] * 100, 2) if group['total_matches'] else 0
+                return {'category': category, 'value': value, 'product_id': product_id, 'product_query': product_query, 'period': period,
+                        'values': sorted(groups), 'groups': sorted(groups.values(), key=lambda x: (-x['total_matches'], x['category_value'])), 'items': items,
                         'buyer_images': len(items), 'total_matches': sum(x['total_matches'] for x in items), 'converted_matches': sum(x['converted_matches'] for x in items)}
         except SQLAlchemyError:
             raise HTTPException(503, '分类统计暂不可用，请重试。') from None

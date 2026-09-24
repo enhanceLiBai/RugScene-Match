@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
-import { Button, Card, Col, DatePicker, Empty, Image, Input, Row, Select, Space, Statistic, Table, Typography, message } from 'antd';
+import { Button, Card, Col, DatePicker, Empty, Image, Input, Modal, Row, Select, Space, Statistic, Table, Typography, message } from 'antd';
 
 export default function ProductStatistics({ api }) {
   const [period, setPeriod] = useState('7d');
@@ -9,6 +9,7 @@ export default function ProductStatistics({ api }) {
   const [search, setSearch] = useState('');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(null);
   const requestId = useRef(0);
 
   useEffect(() => {
@@ -28,6 +29,12 @@ export default function ProductStatistics({ api }) {
   }, [period, dates, search]);
 
   const submitSearch = () => setSearch(searchInput.trim());
+  const removeImage = image => Modal.confirm({ title: '确认删除这张图片？', content: '删除后图片及其关联向量会从图库移除，历史匹配记录仍会保留。', okText: '删除', okType: 'danger', cancelText: '取消', onOk: async () => {
+    setDeleting(image.image_id);
+    try { await api(`/api/library/${image.image_id}`, { method: 'DELETE' }); setData(current => current && { ...current, items: current.items.filter(item => item.image_id !== image.image_id) }); message.success('图片已删除'); }
+    catch (error) { message.error(error.message); }
+    finally { setDeleting(null); }
+  }});
   return <>
     <Card title="商品数据筛选" className="filter-card">
       <Space wrap>
@@ -49,6 +56,7 @@ export default function ProductStatistics({ api }) {
         { title: '匹配成功次数', dataIndex: 'total_matches' },
         { title: '成交次数', dataIndex: 'converted_matches' },
         { title: '转化率', dataIndex: 'conversion_rate', render: value => `${value.toFixed(2)}%` },
+        { title: '操作', render: (_, image) => <Button danger size="small" loading={deleting === image.image_id} onClick={() => removeImage(image)}>删除</Button> },
       ]} />
     </Card>
   </>;
