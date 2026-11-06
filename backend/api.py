@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 import json
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from starlette.concurrency import run_in_threadpool
 import threading
 from functools import lru_cache
@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import text, select
@@ -78,9 +78,11 @@ class LibraryImageResponse(BaseModel):
     mime_type: str
     width: int
     height: int
+    created_at: datetime
     models: list[ModelResponse]
-    sku: str | None = None
+    product_id: str | None = None
     product_name: str | None = None
+    sku: str | None = None
     size: str | None = None
     price: float | None = None
     room: str | None = None
@@ -88,6 +90,7 @@ class LibraryImageResponse(BaseModel):
     color: str | None = None
     stock: str | None = None
     selling_point: str | None = None
+    history_reference_count: int = 0
 
 
 class LibraryResponse(BaseModel):
@@ -138,6 +141,7 @@ class ProductSearchResponse(BaseModel):
     product_download_url: str | None = None
     match_explanation: str | None = None
     buyer_image_id: int | None = None
+    product_name: str | None = None
     style: str | None = None
 
 
@@ -204,6 +208,7 @@ def _optional_price(value: str | None) -> Decimal | None:
 def _metadata_response(row: LibraryRow | SearchRow) -> dict[str, str | float | None]:
     """集中映射九个商品字段，避免图库、上传和搜索响应各自漂移。"""
     return {
+        "product_id": getattr(row, "product_id", None),
         "sku": row.sku,
         "product_name": row.product_name,
         "size": row.size,
@@ -216,7 +221,7 @@ def _metadata_response(row: LibraryRow | SearchRow) -> dict[str, str | float | N
     }
 
 
-def _library_image_response(row: LibraryRow) -> LibraryImageResponse:
+def _library_image_response(row: LibraryRow, history_reference_count: int = 0) -> LibraryImageResponse:
     """将仓库图库行统一映射为 HTTP 图片表示。"""
     return LibraryImageResponse(
         id=row.image_id,
@@ -225,7 +230,9 @@ def _library_image_response(row: LibraryRow) -> LibraryImageResponse:
         mime_type=row.mime_type,
         width=row.width,
         height=row.height,
+        created_at=row.created_at,
         models=[_model_response(identity) for identity in row.models],
+        history_reference_count=history_reference_count,
         **_metadata_response(row),
     )
 
@@ -267,6 +274,9 @@ def create_app(
     admin_dist = application_frontend_root / "admin-ui-dist"
     if admin_dist.exists():
         app.mount("/admin/v2/assets", StaticFiles(directory=admin_dist / "assets"), name="admin-v2-assets")
+    customer_dist = application_frontend_root / "customer-ui-dist"
+    if customer_dist.exists():
+        app.mount("/assets", StaticFiles(directory=customer_dist / "assets"), name="customer-assets")
     install_auth(app, application_session_factory, application_frontend_root)
     install_conversions(app, application_session_factory)
     app.middleware('http')(restrict_management_access)
@@ -393,16 +403,23 @@ def create_app(
 
     @app.get('/api/admin/exceptions')
     def list_match_exceptions(request: Request, status: Literal['open', 'resolved', 'all'] = 'open',
-                              customer_id: int | None = Query(None, ge=1)):
+                              customer_id: int | None = Query(None, ge=1),
+                              start_date: date | None = None, end_date: date | None = None):
         if request.state.user['role'] != 'admin':
             raise HTTPException(status_code=403, detail='仅管理员可查看异常记录。')
         try:
             with application_session_factory() as session:
-                stmt = select(MatchException).order_by(MatchException.id.desc()).limit(200)
+                stmt = select(MatchException).order_by(MatchException.id.desc())
                 if status != 'all':
                     stmt = stmt.where(MatchException.status == status)
-                rows = list(session.scalars(stmt))
+                if start_date is not None:
+                    stmt = stmt.where(MatchException.created_at >= datetime.combine(start_date, datetime.min.time(), tzinfo=timezone(timedelta(hours=8))))
+                if end_date is not None:
+                    stmt = stmt.where(MatchException.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone(timedelta(hours=8))))
+                rows = list(session.scalars(stmt.limit(200)))
                 histories = {row.id: session.get(MatchHistory, row.history_id) for row in rows}
+                history_ids_with_images = set(session.scalars(select(MatchHistoryImage.history_id).where(
+                    MatchHistoryImage.history_id.in_([h.id for h in histories.values() if h]))))
                 users = {u.id: public_user(u) for u in session.scalars(select(UserAccount).where(
                     UserAccount.id.in_([h.user_id for h in histories.values() if h and h.user_id])))}
                 items = []
@@ -413,7 +430,8 @@ def create_app(
                     payload = json.loads(history.payload_json)
                     items.append({'id': row.id, 'history_id': row.history_id, 'status': row.status,
                                   'created_at': row.created_at.isoformat(), 'resolved_at': row.resolved_at.isoformat() if row.resolved_at else None,
-                                  'user': users.get(history.user_id), 'query_image_url': f'/api/history/{history.id}/image',
+                                  'user': users.get(history.user_id),
+                                  'query_image_url': f'/api/history/{history.id}/image' if history.id in history_ids_with_images else None,
                                   'query_scene': payload.get('query_scene'), 'message': payload.get('message')})
                 return {'items': items}
         except SQLAlchemyError:
@@ -430,9 +448,12 @@ def create_app(
             history = session.get(MatchHistory, row.history_id)
             if history is None:
                 raise HTTPException(status_code=404, detail='关联匹配记录不存在。')
+            has_image = session.scalar(select(MatchHistoryImage.history_id).where(MatchHistoryImage.history_id == history.id))
+            user = session.get(UserAccount, history.user_id) if history.user_id else None
             return {'id': row.id, 'history_id': row.history_id, 'status': row.status,
                     'created_at': row.created_at.isoformat(), 'payload': json.loads(history.payload_json),
-                    'query_image_url': f'/api/history/{history.id}/image'}
+                    'user': public_user(user) if user else None,
+                    'query_image_url': f'/api/history/{history.id}/image' if has_image else None}
 
     @app.post('/api/admin/exceptions/{exception_id}/resolve')
     def resolve_match_exception(exception_id: int, request: Request):
@@ -536,9 +557,20 @@ def create_app(
         """返回稳定排序的图库图片及可用模型身份。"""
         try:
             rows = repository.list_library()
+            references = {row.image_id: 0 for row in rows}
+            for payload_json in repository._session.scalars(select(MatchHistory.payload_json)):
+                referenced = {
+                    item.get("buyer_image_id")
+                    for item in json.loads(payload_json).get("results", [])
+                    if isinstance(item, dict)
+                }
+                for image_id in referenced & references.keys():
+                    references[image_id] += 1
         except SQLAlchemyError as error:
             raise HTTPException(status_code=503, detail="服务暂不可用，请稍后重试。") from error
-        return LibraryResponse(images=[_library_image_response(row) for row in rows])
+        return LibraryResponse(images=[
+            _library_image_response(row, references[row.image_id]) for row in rows
+        ])
 
     @app.post("/api/library", response_model=LibraryImportResponse)
     async def upload_library_image(
@@ -687,6 +719,7 @@ def create_app(
                 product_id=row.product_id,
                 matched_buyer_image_url=f"/api/images/{row.buyer_image_id}",
                 buyer_image_id=row.buyer_image_id,
+                product_name=_optional_text(row.product_name),
                 style=_optional_text(row.style),
                 product_image_url=f"/api/images/{row.product_image_id}" if row.product_image_id else None,
                 matched_source_column=row.source_column,
@@ -719,13 +752,17 @@ def create_app(
     @app.get("/", include_in_schema=False)
     def frontend_index() -> FileResponse:
         """仅公开固定前端入口，不挂载整个项目目录。"""
-        return FileResponse(application_frontend_root / "index.html", media_type="text/html")
+        customer_index = application_frontend_root / "customer-ui-dist" / "index.html"
+        return FileResponse(customer_index if customer_index.exists() else application_frontend_root / "index.html", media_type="text/html")
 
     @app.get("/styles.css", include_in_schema=False)
     def frontend_styles() -> FileResponse:
         return FileResponse(application_frontend_root / "styles.css", media_type="text/css")
 
     @app.get("/admin", include_in_schema=False)
+    def admin_page() -> RedirectResponse:
+        return RedirectResponse('/admin/v2', status_code=307)
+
     @app.get("/feedback", include_in_schema=False)
     def feedback_page() -> FileResponse:
         return FileResponse(application_frontend_root / "feedback.html", media_type="text/html")
@@ -773,3 +810,4 @@ def create_app(
 
 
 app = create_app()
+

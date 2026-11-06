@@ -19,7 +19,7 @@ PROXY_HEADERS = ('cf-connecting-ip', 'cf-ray', 'forwarded', 'x-forwarded-for')
 def is_customer_request(method: str, path: str) -> bool:
     path = path.rstrip('/') or '/'
     if method in ('GET', 'HEAD'):
-        return path in PUBLIC_ASSETS or re.fullmatch(r'/api/images/[0-9]+', path) is not None or re.fullmatch(r'/api/my-history(?:/[0-9]+(?:/image)?)?', path) is not None
+        return path in PUBLIC_ASSETS or re.fullmatch(r'/assets/[^/]+', path) is not None or re.fullmatch(r'/api/images/[0-9]+', path) is not None or re.fullmatch(r'/api/my-history(?:/[0-9]+(?:/image)?)?', path) is not None
     return method == 'POST' and path in ('/api/search', '/api/conversions', '/api/auth/login', '/api/auth/logout')
 
 

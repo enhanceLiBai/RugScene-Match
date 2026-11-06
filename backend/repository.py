@@ -4,6 +4,7 @@ from __future__ import annotations
 from backend.observability import timed
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import PurePosixPath, PureWindowsPath
 import re
@@ -22,8 +23,8 @@ from backend.models import ImageEmbedding, ImageRecord, ImportJob, ProductImage
 class ImageMetadata:
     """图片的九个选填商品字段；更新时 None 表示不覆盖已有值。"""
 
-    sku: str | None = None
     product_name: str | None = None
+    sku: str | None = None
     size: str | None = None
     price: Decimal | None = None
     room: str | None = None
@@ -70,6 +71,7 @@ class ProductSearchRow:
     similarity_percent: float
     scene_labels: dict | None = None
     style: str | None = None
+    product_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,7 +84,9 @@ class LibraryRow:
     mime_type: str
     width: int
     height: int
+    created_at: datetime
     models: tuple[EncoderIdentity, ...]
+    product_id: str | None = None
     sku: str | None = None
     product_name: str | None = None
     size: str | None = None
@@ -298,6 +302,7 @@ class ImageRepository:
                 ImageEmbedding.dimension.asc(),
             )
         )
+        product_ids = {row.image_id: row.product_id for row in self._session.scalars(select(ProductImage).where(ProductImage.image_role == "buyer_sofa", ProductImage.is_active.is_(True)))}
         records: dict[int, LibraryRow] = {}
         for image, embedding in self._session.execute(statement):
             existing = records.get(image.id)
@@ -309,7 +314,9 @@ class ImageRepository:
                     mime_type=image.mime_type,
                     width=image.width,
                     height=image.height,
+                    created_at=image.created_at,
                     models=(),
+                    product_id=product_ids.get(image.id),
                     sku=image.sku,
                     product_name=image.product_name,
                     size=image.size,
@@ -328,6 +335,7 @@ class ImageRepository:
                     mime_type=existing.mime_type,
                     width=existing.width,
                     height=existing.height,
+                    created_at=existing.created_at,
                     models=existing.models
                     + (
                         EncoderIdentity(
@@ -337,6 +345,7 @@ class ImageRepository:
                             dimension=embedding.dimension,
                         ),
                     ),
+                    product_id=existing.product_id,
                     sku=existing.sku,
                     product_name=existing.product_name,
                     size=existing.size,
@@ -393,7 +402,8 @@ class ImageRepository:
         main = aliased(ProductImage)
         distance = ImageEmbedding.embedding.cosine_distance(_validated_vector(identity, query))
         statement = (
-            select(buyer.product_id, ImageRecord.id, main.image_id, buyer.source_column, distance, ImageRecord.style)
+            select(buyer.product_id, ImageRecord.id, main.image_id, buyer.source_column, distance,
+                   ImageRecord.style, ImageRecord.product_name)
             .select_from(ImageRecord)
             .join(ImageEmbedding, ImageEmbedding.image_id == ImageRecord.id)
             .outerjoin(buyer, and_(buyer.image_id == ImageRecord.id,
@@ -409,28 +419,16 @@ class ImageRepository:
         )
         import json
         from backend.models import SceneLabel
-        from backend.scene import VERSION, score_scene_with_mode
+        from backend.scene import VERSION, score_scene
         labels = {x.image_id: json.loads(x.labels_json) for x in self._session.scalars(select(SceneLabel).where(SceneLabel.model == scene_model, SceneLabel.version == VERSION))}
-        raw_candidates = []
-        for product_id, buyer_id, main_id, column, distance_value, style in self._session.execute(statement):
+        candidates = []
+        for product_id, buyer_id, main_id, column, distance_value, style, product_name in self._session.execute(statement):
             visual = cosine_distance_to_percent(float(distance_value))
             tags = labels.get(buyer_id)
-            raw_candidates.append((product_id, buyer_id, main_id, column, visual, tags, style))
-        candidates = []
-        if filter_scene:
-            exact = []
-            grouped = []
-            for product_id, buyer_id, main_id, column, visual, tags, style in raw_candidates:
-                group_score = score_scene_with_mode(scene_labels, tags, visual, exact_color=False)
-                if group_score[0] >= 0:
-                    grouped.append(ProductSearchRow(product_id,buyer_id,main_id,column,visual,tags,style))
-                    exact_score = score_scene_with_mode(scene_labels, tags, visual, exact_color=True)
-                    if exact_score[0] >= 0:
-                        exact.append(ProductSearchRow(product_id,buyer_id,main_id,column,visual,tags,style))
-            candidates = exact if exact else grouped
-        else:
-            candidates = [ProductSearchRow(product_id,buyer_id,main_id,column,visual,tags,style)
-                          for product_id, buyer_id, main_id, column, visual, tags, style in raw_candidates]
+            score = score_scene(scene_labels, tags, visual)[0] if filter_scene else visual
+            if score < 0:
+                continue
+            candidates.append(ProductSearchRow(product_id,buyer_id,main_id,column,score,tags,style,product_name))
         candidates.sort(key=lambda row: (-row.similarity_percent,row.buyer_image_id,row.product_id or ''))
         seen: set[tuple[str, str | int]] = set()
         results = []

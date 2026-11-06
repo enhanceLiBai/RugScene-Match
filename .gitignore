@@ -11,11 +11,21 @@ __pycache__/
 *.py[cod]
 .superpowers/
 .worktrees/
-.publish-repo/
 
 data/ranking-labels/
+
+# Local-only files and runtime data
+.publish-repo/
+.tools/
 data/
+runtime-logs/
+客服账号/
+node_modules/
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.sqlite3
+*.db
 *.xlsx
 pytest-cache-files-*/
-客服账号/
-dev-runtime/客服账号/

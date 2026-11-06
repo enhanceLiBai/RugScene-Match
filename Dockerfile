@@ -5,5 +5,6 @@ COPY requirements.in ./
 RUN pip install --no-cache-dir -r requirements.in
 COPY backend ./backend
 COPY index.html app.js api-client.js matcher-core.js styles.css ./
+COPY customer-ui-dist ./customer-ui-dist
 EXPOSE 8000
 CMD ["python", "-m", "backend.cli", "serve"]

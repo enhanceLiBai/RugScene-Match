@@ -16,7 +16,7 @@ document.querySelector('#loginForm').onsubmit = async (event) => {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '请检查账号和密码。');
-    location.replace(adminLogin ? '/admin' : '/');
+    location.replace(adminLogin ? '/admin/v2' : '/');
   } catch (error) {
     status.className = 'status-message error';
     status.textContent = error.message || '登录失败，请重试。';

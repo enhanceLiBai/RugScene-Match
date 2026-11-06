@@ -104,14 +104,6 @@ class SceneLabel(Base):
     model: Mapped[str] = mapped_column(Text)
     version: Mapped[str] = mapped_column(Text)
     labels_json: Mapped[str] = mapped_column(Text)
-    sofa_color: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sofa_color_group: Mapped[str | None] = mapped_column(Text, nullable=True)
-    floor_color: Mapped[str | None] = mapped_column(Text, nullable=True)
-    floor_color_group: Mapped[str | None] = mapped_column(Text, nullable=True)
-    wall_status: Mapped[str | None] = mapped_column(Text, nullable=True)
-    wall_color: Mapped[str | None] = mapped_column(Text, nullable=True)
-    wall_color_group: Mapped[str | None] = mapped_column(Text, nullable=True)
-    wall_material: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

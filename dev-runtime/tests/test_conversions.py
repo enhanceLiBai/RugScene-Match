@@ -224,6 +224,17 @@ def test_admin_product_statistics_search_dates_and_totals(api_settings, api_sess
         searched = client.get('/api/admin/product-statistics', params={'period': 'all', 'search': '云朵'}).json()
         assert [item['image_id'] for item in searched['items']] == [first_image, second_image]
         assert searched['total_matches'] == 6 and searched['converted_matches'] == 1
+        renamed = client.patch('/api/admin/products/P-A/name', json={'product_name': '  云朵地毯（修正）  '})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json() == {'product_id': 'P-A', 'product_name': '云朵地毯（修正）', 'updated_images': 2}
+        product_items = client.get('/api/admin/product-statistics', params={'period': 'all', 'search': 'P-A'}).json()['items']
+        assert {item['product_name'] for item in product_items} == {'云朵地毯（修正）'}
+        category_items = client.get('/api/admin/product-category-statistics', params={'product_query': 'P-A'}).json()['items']
+        assert {item['product_name'] for item in category_items} == {'云朵地毯（修正）'}
+        library_items = [item for item in client.get('/api/library').json()['images'] if item['product_id'] == 'P-A']
+        assert len(library_items) == 2
+        assert {item['product_name'] for item in library_items} == {'云朵地毯（修正）'}
+        assert client.patch('/api/admin/products/P-A/name', json={'product_name': '   '}).status_code == 422
         empty_day = (today - timedelta(days=2)).date().isoformat()
         empty = client.get('/api/admin/product-statistics', params={'period': 'custom', 'search': 'P-A', 'start_date': empty_day, 'end_date': empty_day}).json()
         assert empty['total_matches'] == empty['converted_matches'] == empty['conversion_rate'] == 0

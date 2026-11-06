@@ -1,0 +1,1 @@
+{"name":"customer-match-ui","private":true,"scripts":{"build":"vite build"},"dependencies":{"@vitejs/plugin-react":"^4.3.4","antd":"^5.27.4","@ant-design/icons":"^5.6.1","react":"^18.3.1","react-dom":"^18.3.1","vite":"^6.1.0"},"devDependencies":{}}

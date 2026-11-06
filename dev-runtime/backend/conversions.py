@@ -4,7 +4,7 @@ import json
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, update
 from datetime import date, datetime, timedelta, timezone
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -16,6 +16,11 @@ class ConversionRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     history_id: int = Field(gt=0)
     rank: int = Field(gt=0, le=50)
+
+
+class ProductNameUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    product_name: str = Field(min_length=1, max_length=500)
 
 
 def conversion_data(row):
@@ -32,6 +37,26 @@ def install_conversions(app, factory):
         if row is None or row.user_id != user_id:
             raise HTTPException(404, '查询记录不存在。')
         return row
+
+    @app.patch('/api/admin/products/{product_id}/name')
+    def update_product_name(product_id: str, body: ProductNameUpdateRequest, request: Request):
+        require_admin(request)
+        product_name = body.product_name.strip()
+        if not product_name:
+            raise HTTPException(422, '商品名称不能为空。')
+        try:
+            with factory() as session:
+                image_ids = list(session.scalars(select(ProductImage.image_id).where(
+                    ProductImage.product_id == product_id,
+                    ProductImage.is_active.is_(True),
+                ).distinct()))
+                if not image_ids:
+                    raise HTTPException(404, '商品不存在。')
+                result = session.execute(update(ImageRecord).where(ImageRecord.id.in_(image_ids)).values(product_name=product_name))
+                session.commit()
+                return {'product_id': product_id, 'product_name': product_name, 'updated_images': result.rowcount}
+        except SQLAlchemyError:
+            raise HTTPException(503, '商品名称更新失败，请重试。') from None
 
     @app.post('/api/conversions')
     def register_conversion(body: ConversionRequest, request: Request):

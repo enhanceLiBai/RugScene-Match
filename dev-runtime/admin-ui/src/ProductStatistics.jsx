@@ -10,6 +10,9 @@ export default function ProductStatistics({ api }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [productName, setProductName] = useState('');
+  const [savingName, setSavingName] = useState(false);
   const requestId = useRef(0);
 
   useEffect(() => {
@@ -29,6 +32,19 @@ export default function ProductStatistics({ api }) {
   }, [period, dates, search]);
 
   const submitSearch = () => setSearch(searchInput.trim());
+  const openNameEditor = image => { setEditing(image); setProductName(image.product_name || ''); };
+  const saveProductName = async () => {
+    const name = productName.trim();
+    if (!name) { message.error('商品名称不能为空'); return; }
+    setSavingName(true);
+    try {
+      const result = await api(`/api/admin/products/${encodeURIComponent(editing.product_id)}/name`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ product_name: name }) });
+      setData(current => current && { ...current, items: current.items.map(item => item.product_id === result.product_id ? { ...item, product_name: result.product_name } : item) });
+      setEditing(null);
+      message.success(`已同步更新 ${result.updated_images} 张关联图片`);
+    } catch (error) { message.error(error.message); }
+    finally { setSavingName(false); }
+  };
   const removeImage = image => Modal.confirm({ title: '确认删除这张图片？', content: '删除后图片及其关联向量会从图库移除，历史匹配记录仍会保留。', okText: '删除', okType: 'danger', cancelText: '取消', onOk: async () => {
     setDeleting(image.image_id);
     try { await api(`/api/library/${image.image_id}`, { method: 'DELETE' }); setData(current => current && { ...current, items: current.items.filter(item => item.image_id !== image.image_id) }); message.success('图片已删除'); }
@@ -56,8 +72,12 @@ export default function ProductStatistics({ api }) {
         { title: '匹配成功次数', dataIndex: 'total_matches' },
         { title: '成交次数', dataIndex: 'converted_matches' },
         { title: '转化率', dataIndex: 'conversion_rate', render: value => `${value.toFixed(2)}%` },
-        { title: '操作', render: (_, image) => <Button danger size="small" loading={deleting === image.image_id} onClick={() => removeImage(image)}>删除</Button> },
+        { title: '操作', render: (_, image) => <Space><Button size="small" onClick={() => openNameEditor(image)}>修改名称</Button><Button danger size="small" loading={deleting === image.image_id} onClick={() => removeImage(image)}>删除</Button></Space> },
       ]} />
     </Card>
+    <Modal title="修改商品名称" open={!!editing} onOk={saveProductName} confirmLoading={savingName} onCancel={() => setEditing(null)} okText="保存" cancelText="取消">
+      <Typography.Paragraph type="secondary">商品 ID：{editing?.product_id}</Typography.Paragraph>
+      <Input value={productName} maxLength={500} showCount autoFocus onChange={event => setProductName(event.target.value)} onPressEnter={saveProductName} placeholder="请输入正确的商品名称" />
+    </Modal>
   </>;
 }

@@ -16,8 +16,8 @@ DEV_PORT = 8001
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    command = [str(PYTHON), "-u", "-c", f"import logging; logging.basicConfig(level=logging.INFO); from backend.cli import main; raise SystemExit(main(['serve', '--host', '127.0.0.1', '--port', '{DEV_PORT}']))"]
-    logging.info("启动开发服务：http://127.0.0.1:%s（共用当前数据库）", DEV_PORT)
+    command = [str(PYTHON), "-u", "-c", f"import logging; logging.basicConfig(level=logging.INFO); from backend.cli import main; raise SystemExit(main(['serve', '--host', '0.0.0.0', '--port', '{DEV_PORT}']))"]
+    logging.info("启动开发服务：http://0.0.0.0:%s（局域网可访问，共用当前数据库）", DEV_PORT)
     child = subprocess.Popen(command, cwd=DEV_ROOT)
     try:
         return child.wait()
